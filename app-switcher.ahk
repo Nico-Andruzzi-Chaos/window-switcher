@@ -1,6 +1,7 @@
 ; Requires AutoHotkey v2
 #Include "./GuiEnhancerKit.ahk"
 #Include "./logical-app.ahk"
+#Include "./app-switcher-style.ahk"
 
 ;--------------------------------------------------------
 ; App Switcher
@@ -19,23 +20,6 @@
 ; See logical-app.ahk for how that identity, and each app's name and icon, are found.
 
 ;--------------------------------------------------------
-; Handle resources for compiling to EXE
-;--------------------------------------------------------
-; `FileInstall` when compiled, copies the files from the EXE to the destination directory.
-; `FileInstall` when not compiled, copies the files from the source directory to the destination directory.
-; Thus in both cases the resources can be referenced by the same path.
-; When Ahk2Exe processes the script, it parses `FileInstall` commands
-; in a basic way, so variables and expressions are not supported for the Source parameter,
-; and thus loops can't be used to install multiple files in a succinct way.
-
-ResourcesDir := A_Temp "/AppSwitcherResources/"
-if !FileExist(ResourcesDir) {
-	DirCreate(ResourcesDir)
-}
-FileInstall("resources/app-border-inactive.png", ResourcesDir "app-border-inactive.png", true)
-FileInstall("resources/app-border-active.png", ResourcesDir "app-border-active.png", true)
-
-;--------------------------------------------------------
 ; Windows API constants
 ;--------------------------------------------------------
 ; Note: window style, icon and app model constants live in logical-app.ahk,
@@ -44,19 +28,10 @@ FileInstall("resources/app-border-active.png", ResourcesDir "app-border-active.p
 SS_WORDELLIPSIS := 0x0000C000
 SS_NOPREFIX := 0x00000080
 
-; ; DWMWINDOWATTRIBUTE enum
-; DWMWA_WINDOW_CORNER_PREFERENCE := 33
-
-; ; DWM_WINDOW_CORNER_PREFERENCE enum
-; DWMWCP_DEFAULT := 0
-; DWMWCP_DONOTROUND := 1
-; DWMWCP_ROUND := 2
-; DWMWCP_ROUNDSMALL := 3
-
-; DwmSetWindowAttribute(hwnd, attribute, pvAttribute, cbAttribute) {
-; 	DllCall("dwmapi\DwmSetWindowAttribute", "ptr", hwnd, "int", pvAttribute, "int*", true, "int", cbAttribute)
-; }
-
+; The panel's rounded corners and its translucent 1px border both come from DWM rather than from
+; anything here: `SetBorderless` sets DWMWA_WINDOW_CORNER_PREFERENCE to DWMWCP_ROUND, whose 8 epx
+; radius is the radius the real Alt+Tab panel has, and extends the DWM frame into the client area,
+; which is what draws the border. See the note where it's called for how far to extend it.
 
 ; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
 DWMWA_USE_HOSTBACKDROPBRUSH := 16
@@ -103,54 +78,93 @@ ShowAppSwitcher(Apps) {
 	CloseAppSwitcher()  ; just in case - don't want to leave behind an old app switcher window
 
 	global AppSwitcherCancelled := false  ; a fresh session starts out uncancelled
+
+	; Everything below comes out of app-switcher-style.ahk, which holds the presentation values
+	; measured off the real Windows 11 Alt+Tab switcher, and the highlight images drawn from them.
+	EnsureAppSwitcherImages()
+	Dark := DarkModeEnabled()
+
 	global AppSwitcher := GuiExt()
 
-	AppSwitcher.SetFont("cWhite s10", "Segoe UI")
-	AppSwitcher.SetDarkTitle()  ; needed for dark window background apparently, even though there's no title bar
+	AppSwitcher.SetFont(Format("c{:06X} s{:d}", LabelTextColor(Dark), AppSwitcherStyle.LabelFontSize), "Segoe UI")
+	if Dark {
+		AppSwitcher.SetDarkTitle()  ; needed for dark window background apparently, even though there's no title bar
+	}
 	AppSwitcher.SetDarkMenu()  ; should be unnecessary
 
-	; AppSwitcher.BackColor := 0x202020
-	AppSwitcher.BackColor := 0x000000
+	; Windows draws this panel as acrylic when "Transparency effects" is on and as a flat surface
+	; colour when it's off -- which is why the reference screenshots show a byte-identical #202020
+	; over both a white and a black background. Follow whichever the machine is set to. With the
+	; DWM backdrop in play the window has to paint black where the backdrop should show through, so
+	; there the panel colour is DWM's to decide rather than ours.
+	Acrylic := AppSwitcherPanelIsAcrylic()
+	AppSwitcher.BackColor := Acrylic ? 0x000000 : PanelSurfaceColor(Dark)
 
-	AppSwitcher.MarginX := 30
-	AppSwitcher.MarginY := 30
+	; Positions are given explicitly rather than flowed from the margins, because the highlight is
+	; larger than the item it surrounds and has to hang outside it.
+	AppSwitcher.MarginX := 0
+	AppSwitcher.MarginY := 0
+	Extent := AppSwitcherStyle.SelectionExtent
+	ItemSize := AppSwitcherStyle.ItemSize
+	; TODO: get actual size of icon, and allow smaller icons, but not larger than 32 since many programs have 32 as the largest icon size
+	; (at least available through WM_GETICON, where you can only request 16x16 or 32x32, so if they provide 32x32, that's what is returned)
+	; Or get icon from shortcut file, which could get bigger icons.
+	IconSize := AppSwitcherStyle.IconSize
+	LabelInset := AppSwitcherStyle.LabelInset
 	for index, app in Apps {
-		FocusRing := AppSwitcher.Add("Pic", "yM w128 h128 Section", ResourcesDir "app-border-inactive.png")
+		Item := AppSwitcherItemPosition(index)
+		; The highlight sits behind the icon and the label, and is the control whose image gets
+		; swapped as the selection moves. It reaches `Extent` outside the item box on every side,
+		; the way Windows' ring reaches outside its cards.
+		FocusRingOptions := "x" (Item.X - Extent) " y" (Item.Y - Extent)
+			. " w" AppSwitcherStyle.SelectionBoxSize " h" AppSwitcherStyle.SelectionBoxSize
+		FocusRing := AppSwitcher.Add("Pic", FocusRingOptions, AppSwitcherUnselectedImage)
 		FocusRingByHWND[app.HWND] := FocusRing
-		OuterSize := 128
-		; TODO: get actual size of icon, and allow smaller icons, but not larger than 32 since many programs have 32 as the largest icon size
-		; (at least available through WM_GETICON, where you can only request 16x16 or 32x32, so if they provide 32x32, that's what is returned)
-		; Or get icon from shortcut file, which could get bigger icons.
-		IconSize := 32
-		BorderSize := 15
-		TextWidth := OuterSize - 2 * BorderSize
-		Offset := (OuterSize - IconSize) / 2
-		TextY := (OuterSize + IconSize) / 2 + BorderSize
-		TextHeight := OuterSize - TextY - BorderSize
+		; Icon and label are centred as a single group, so the pair sits in the middle of the item
+		; instead of the icon sitting in the middle with the label hanging below it.
+		IconX := Item.X + (ItemSize - IconSize) // 2
+		IconY := Item.Y + (ItemSize - AppSwitcherStyle.ItemContentHeight) // 2
+		LabelY := IconY + IconSize + AppSwitcherStyle.IconToLabelGap
+		IconOptions := "x" IconX " y" IconY " w" IconSize " h" IconSize
+			. " Tabstop vPicForAppWithHWND" app.HWND
 		try {
-			AppSwitcher.Add("Pic", "ys+" Offset " xs+" Offset " w32 h32 Tabstop vPicForAppWithHWND" app.HWND, "HICON:*" app.Icon)
+			AppSwitcher.Add("Pic", IconOptions, "HICON:*" app.Icon)
 		} catch {
 			; Loading the icon can fail, but I don't know in what cases. It just says "Failed to add control"
-			AppSwitcher.Add("Pic", "ys+" Offset " xs+" Offset " w32 h32 Tabstop vPicForAppWithHWND" app.HWND, ResourcesDir "app-border-inactive.png")
+			AppSwitcher.Add("Pic", IconOptions, AppSwitcherUnselectedImage)
 		}
-		AppSwitcher.Add("Text", "w" TextWidth " h" TextHeight " xs+" BorderSize " ys+" TextY " center " SS_WORDELLIPSIS " " SS_NOPREFIX, app.Title)
+		LabelOptions := "x" (Item.X + LabelInset) " y" LabelY
+			. " w" (ItemSize - 2 * LabelInset) " h" AppSwitcherStyle.LabelHeight
+			. " center " SS_WORDELLIPSIS " " SS_NOPREFIX
+		AppSwitcher.Add("Text", LabelOptions, app.Title)
 	}
 	; Belt and braces: this only fires if Escape actually reaches the Gui, which it doesn't
 	; while Alt is held (see the Escape hotkey below), i.e. essentially never in practice.
 	AppSwitcher.OnEvent("Escape", CancelAppSwitcher)
 	AppSwitcher.Opt("+AlwaysOnTop -SysMenu -Caption -Border +Owner")
-	AppSwitcher.Show
+	Panel := AppSwitcherPanelSize(Apps.Length)
+	AppSwitcher.Show("w" Panel.Width " h" Panel.Height)
 
-	; Enables rounded corners.
+	; Enables rounded corners, and the translucent 1px outer border along with them.
 	; Doesn't seem to hide the border if the window is already shown, but `-Border` takes care of that.
-	AppSwitcher.SetBorderless(6)
-	; Set blur-behind accent effect. (Supported starting with Windows 11 Build 22000.)
-	; Doesn't seem to work the first time. See workaround below.
-	if (VerCompare(A_OSVersion, "10.0.22600") >= 0) {
+	;
+	; How far the DWM frame is extended into the client area matters more than it looks. Extended
+	; across the whole window -- which is what `SetBorderless` does by default -- the entire panel
+	; becomes glass: everything GDI paints there is composited with a zero alpha and vanishes, and
+	; only what DWM draws behind it is left. That is exactly right when DWM is drawing an acrylic
+	; backdrop, and exactly wrong when the panel is supposed to be a flat colour, where it left the
+	; padding around the items showing the desktop instead of the surface. So the flat case extends
+	; the frame by a single pixel: enough for DWM to still draw the border and round the corners,
+	; while the client area stays ordinary opaque painting.
+	if Acrylic {
+		AppSwitcher.SetBorderless(6)
+		; Set blur-behind accent effect, matching what the real switcher does when transparency
+		; effects are enabled. (Supported starting with Windows 11 Build 22000.)
+		; Doesn't seem to work the first time. See workaround below.
 		AppSwitcher.SetWindowAttribute(DWMWA_USE_HOSTBACKDROPBRUSH, true)  ; required for DWMSBT_TRANSIENTWINDOW
 		AppSwitcher.SetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
-		; AppSwitcher.SetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TABBEDWINDOW)
-		; AppSwitcher.SetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)
+	} else {
+		AppSwitcher.SetBorderless(6, "", 1, 1, 1, 1)
 	}
 }
 
@@ -216,7 +230,7 @@ UpdateFocusHighlight() {
 	Pic := AppSwitcher.FocusedCtrl
 	if LastFocusHighlight {
 		try {
-			LastFocusHighlight.Value := ResourcesDir "app-border-inactive.png"
+			LastFocusHighlight.Value := AppSwitcherUnselectedImage
 		} catch {
 			; App switcher closed and destroyed the control
 		}
@@ -228,7 +242,7 @@ UpdateFocusHighlight() {
 		return
 	}
 	FocusRing := FocusRingByHWND[Integer(StrSplit(Pic.Name, "PicForAppWithHWND")[2])]
-	FocusRing.Value := ResourcesDir "app-border-active.png"
+	FocusRing.Value := AppSwitcherSelectedImage
 	LastFocusHighlight := FocusRing
 }
 

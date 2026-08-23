@@ -32,9 +32,10 @@ Each utility is lightning fast, compliments each other, and integrates smoothly 
 - <kbd>Escape</kbd> to cancel
 - One entry per application, not one per window
   - Ten browser windows are a single entry, while each installed PWA is its own entry, with its own name and icon. See [Logical applications](#logical-applications).
-- Custom UI, designed to match the Windows 11 theme
-  - Includes acrylic blur-behind effect
-  - Skinnable by editing images in the `resources` folder
+- Custom UI, designed to match the native Windows 11 <kbd>Alt+Tab</kbd> switcher
+  - Follows the system light/dark setting, accent colour, transparency-effects setting and display scaling
+  - Acrylic blur-behind when transparency effects are on, a flat surface colour when they're off, which is what Windows itself does
+  - Restyleable by editing the measured presentation values in `app-switcher-style.ahk`
 
 ## Installation
 
@@ -51,7 +52,7 @@ If you only want one of them, the files each needs are:
 | Utility | Files |
 | --- | --- |
 | Window Switcher | `window-switcher.ahk`, `logical-app.ahk` |
-| Application Switcher | `app-switcher.ahk`, `logical-app.ahk`, `GuiEnhancerKit.ahk`, the `resources` folder |
+| Application Switcher | `app-switcher.ahk`, `app-switcher-style.ahk`, `logical-app.ahk`, `GuiEnhancerKit.ahk` |
 
 `logical-app.ahk` is shared by both, and must sit in the same directory as the script that
 includes it. (Include paths are resolved relative to the script's own folder, so the
@@ -63,7 +64,7 @@ You can run either script directly instead of using `start-both-window-and-app-s
 
 - To run at startup with administrator privileges:
   - Place the scripts somewhere permanent, since moving or renaming them will break the startup action.
-    - Keep the whole extracted folder together: `logical-app.ahk` must stay next to the switcher scripts, and the app switcher also needs `GuiEnhancerKit.ahk` and the `resources` folder.
+    - Keep the whole extracted folder together: `logical-app.ahk` must stay next to the switcher scripts, and the app switcher also needs `app-switcher-style.ahk` and `GuiEnhancerKit.ahk`.
   - Open Task Scheduler
   - Action > Create Task...
   - Check "Run with highest privileges" in "Security options" in General tab
@@ -189,8 +190,7 @@ It's unfortunate, since the app switcher is the one that has dependencies that I
 
 - [ ] Get app switcher working when compiled into `app-switcher.exe`
   - [x] Figure out how to embed the resources
-    - `FileInstall` is a nice built in mechanism for this.
-    - (Might want to support overriding resources by placing them in the same directory as the executable (or in a subdirectory alongside it), or via a config file...)
+    - No longer needed: the selection highlight is drawn at runtime with GDI+ from the values in `app-switcher-style.ahk`, so the app switcher ships no images. (`FileInstall` was the mechanism while it did.)
   - [x] Fix app crashing, usually silently but occasionally showing an "critical error" message with very little information
     - Narrowed it down to a memory issue with `wsprintf` where it would write a null terminator past the end of the buffer
   - [ ] 🙈 Not all apps are shown (e.g. Chrome, Firefox, and VS Code are missing)
