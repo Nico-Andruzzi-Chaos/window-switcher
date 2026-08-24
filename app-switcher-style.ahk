@@ -56,9 +56,23 @@ class AppSwitcherStyle {
 	; can show without upscaling. (See the TODO in app-switcher.ahk.)
 	static IconSize := 32
 	static IconToLabelGap := 14
-	static LabelHeight := 18
+	; The line height of the "Body" ramp below, which is what this needs to be: a Static
+	; control clips whatever doesn't fit, so anything less than the font's line height slices
+	; the bottom off descenders -- the tail of a "g" most visibly. This was 18, which clipped
+	; by 1 px at 150% scaling and 1 px at 200%. Measured need for 10 pt Segoe UI, against what
+	; 18 and 20 epx come out as:
+	;     scaling   needed   18 epx      20 epx
+	;     100%      17 px    18 px ok    20 px ok
+	;     125%      23 px    23 px ok    25 px ok
+	;     150%      28 px    27 px CLIP  30 px ok
+	;     175%      31 px    32 px ok    35 px ok
+	;     200%      37 px    36 px CLIP  40 px ok
+	;     250%      45 px    45 px ok    50 px ok
+	; Re-check this table if LabelFontSize changes.
+	static LabelHeight := 20
 	static LabelInset := 10
-	; Points. Windows 11's "Body" style, which its card titles use, is 14 epx == 10.5pt.
+	; Points. Windows 11's "Body" style, which its card titles use, is 14 epx == 10.5pt,
+	; with a 20 epx line height -- hence LabelHeight above.
 	static LabelFontSize := 10
 
 	; -- Selection ------------------------------------------------------------------------
