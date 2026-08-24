@@ -92,12 +92,11 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	; edge of the screen once there were more apps than the display was wide enough for (nine
 	; at 1920x150%, twenty-three at 5120x150%).
 	;
-	; The work area comes back in physical pixels, while Gui X/Y/W/H are in DPI-scaled units,
-	; so it's converted rather than used directly.
+	; The work area comes back in physical pixels, while `Gui.Show`'s W/H are in DPI-scaled
+	; units, so the room available has to be converted before the layout is measured in it.
 	WorkArea := AppSwitcherWorkArea(AnchorWindow)
-	AvailableWidth := ScaleToGuiUnits(WorkArea.Width)
-	AvailableHeight := ScaleToGuiUnits(WorkArea.Height)
-	Layout := AppSwitcherPanelLayout(Apps.Length, AvailableWidth, AvailableHeight)
+	Layout := AppSwitcherPanelLayout(Apps.Length
+		, ScaleToGuiUnits(WorkArea.Width), ScaleToGuiUnits(WorkArea.Height))
 
 	global AppSwitcher := GuiExt()
 
@@ -169,13 +168,21 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	; while Alt is held (see the Escape hotkey below), i.e. essentially never in practice.
 	AppSwitcher.OnEvent("Escape", CancelAppSwitcher)
 	AppSwitcher.Opt("+AlwaysOnTop -SysMenu -Caption -Border +Owner")
-
-	Position := "x" (ScaleToGuiUnits(WorkArea.Left) + (AvailableWidth - Layout.Width) // 2)
-		. " y" (ScaleToGuiUnits(WorkArea.Top) + (AvailableHeight - Layout.Height) // 2)
-	; The warm-up must genuinely show the window -- DWM won't establish composition state for
-	; one that was never shown, so "Hide" here would stop the warm-up warming anything up.
-	; NoActivate is as far as it can be toned down: still shown, but focus stays put.
-	AppSwitcher.Show((Warmup ? "NoActivate " : "") Position " w" Layout.Width " h" Layout.Height)
+	; Centre the panel by measuring it rather than predicting it. `Gui.Show` scales W/H by the
+	; display DPI but passes X/Y through unscaled (measured: "x100 y100 w200 h200" on a 150%
+	; display gives a 300x300 window at physical 100,100), so positioning in the same call
+	; would offset the panel by a DPI-dependent amount that grows as the panel gets smaller.
+	; Showing it hidden first gives a real window rect in physical pixels, which is the same
+	; unit as the work area and as `WinMove`, so nothing has to be scaled at all.
+	AppSwitcher.Show("Hide w" Layout.Width " h" Layout.Height)
+	WinGetPos(, , &PanelWidth, &PanelHeight, AppSwitcher)
+	WinMove(WorkArea.Left + (WorkArea.Width - PanelWidth) // 2
+		, WorkArea.Top + (WorkArea.Height - PanelHeight) // 2
+		, , , AppSwitcher)
+	; W/H/X/Y all omitted, so the window keeps the size and position set above. The warm-up
+	; must genuinely be shown -- DWM won't establish composition state for a window that never
+	; was -- so NoActivate is as far as it can be toned down: shown, but focus stays put.
+	AppSwitcher.Show(Warmup ? "NoActivate" : "")
 
 	; DWM applies these to a window that already exists, and how far the frame is extended
 	; depends on the window's final size, so this has to come after `Show`.

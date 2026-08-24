@@ -334,8 +334,12 @@ ApplyAppSwitcherFrame(PanelGui, Inset := "") {
 
 ; Effective pixels to real ones, matching how AutoHotkey scales Gui coordinates.
 ScaleToPixels(Value) => Round(Value * A_ScreenDPI / 96)
-; ...and back, for turning physical measurements (monitor work areas, WinGetPos) into the
-; Gui units that `Gui.Add` and `Gui.Show` take.
+; ...and back, for turning physical measurements (monitor work areas, WinGetPos) into the Gui
+; units that `Gui.Add` and `Gui.Show`'s W/H take.
+;
+; Careful: `Gui.Show`'s *W/H* are DPI-scaled, but its *X/Y* are not -- measured on a 150%
+; display, "x100 y100 w200 h200" produces a 300x300 window at physical 100,100. So sizes go
+; through here and positions must not; see how ShowAppSwitcher centres the panel.
 ScaleToGuiUnits(Value) => Round(Value * 96 / A_ScreenDPI)
 
 AppSwitcherImageDir := A_Temp "\AppSwitcherImages\"
