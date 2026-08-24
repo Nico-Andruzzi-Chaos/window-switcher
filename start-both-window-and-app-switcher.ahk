@@ -1,4 +1,4 @@
-; Requires AutoHotkey v2
+#Requires AutoHotkey v2.0
 
 ;--------------------------------------------------------
 ; Start both switchers

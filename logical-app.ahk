@@ -1,4 +1,4 @@
-; Requires AutoHotkey v2
+#Requires AutoHotkey v2.0
 
 ;--------------------------------------------------------
 ; Logical Application Identity
@@ -70,6 +70,14 @@ PID_AppUserModel_ID := 5 ; System.AppUserModel.ID
 PID_AppUserModel_RelaunchIconResource := 3 ; System.AppUserModel.RelaunchIconResource
 PID_AppUserModel_RelaunchDisplayNameResource := 4 ; System.AppUserModel.RelaunchDisplayNameResource
 
+; PROPERTYKEYs from the version-resource property set. The shell surfaces an
+; executable's version info as ordinary properties, which saves reading the version
+; resource by hand. (Measured: chrome.exe -> FileDescription "Google Chrome".)
+; https://learn.microsoft.com/en-us/windows/win32/properties/props-system-filedescription
+PKEY_Version_FMTID := "{0CEF7D53-FA64-11D1-A203-0000F81FEDEE}"
+PID_FileDescription := 3 ; System.FileDescription
+PID_ProductName := 7 ; System.Software.ProductName
+
 ; VARENUM members that a string-valued PROPVARIANT can use.
 VT_EMPTY := 0
 VT_BSTR := 8
@@ -109,6 +117,18 @@ LogicalAppNameCache := Map()
 ; the icons we extract ourselves are HICONs we own, and caching them means opening the
 ; switcher repeatedly can't leak a handle per keypress.
 LogicalAppIconCache := Map()
+
+; Executable display names, keyed by path and never cleared: an executable's version info
+; doesn't change while it's running, so this turns the shell bind above into a one-off per
+; application rather than a cost paid on every Alt+Tab.
+ExecutableDisplayNameCache := Map()
+ExecutableDisplayNameCache.CaseSense := false ; paths are case-insensitive on Windows
+
+; Shortcut icons, keyed by shortcut path for the same reason. Keying these outside the
+; shortcut index matters: BuildAppShortcutIndex replaces every entry object, so an icon
+; cached on the entry itself would be orphaned -- leaked, since nothing calls DestroyIcon
+; on it -- every time the index is rebuilt.
+ShortcutIconCache := Map()
 
 ClearLogicalAppCache() {
 	LogicalAppIdCache.Clear()
@@ -213,8 +233,52 @@ GetFileShellProperty(Path, FormatId, PropertyId) {
 	return ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId)
 }
 
+; Reads several properties from one property store, returning the first non-empty value.
+; Binding the store is the expensive part -- measured at 6+ ms per bind on a local
+; executable -- and this runs on the interactive Alt+Tab path, once per application without
+; an AUMID. So properties that are alternatives to one another are read in a single call
+; rather than one call each.
+GetFirstFileShellProperty(Path, FormatId, PropertyIds*) {
+	if (Path = "") {
+		return ""
+	}
+	InterfaceId := Buffer(16, 0)
+	if (DllCall("ole32\CLSIDFromString", "wstr", IID_IPropertyStore, "ptr", InterfaceId, "int") != 0) {
+		return ""
+	}
+	PropertyStore := 0
+	try {
+		HResult := DllCall("shell32\SHGetPropertyStoreFromParsingName", "wstr", Path, "ptr", 0, "uint", GPS_DEFAULT, "ptr", InterfaceId, "ptr*", &PropertyStore, "int")
+	} catch {
+		return ""
+	}
+	if (HResult != 0 || !PropertyStore) {
+		return ""
+	}
+	try {
+		for PropertyId in PropertyIds {
+			Value := ReadStringProperty(PropertyStore, FormatId, PropertyId)
+			if (Value != "") {
+				return Value
+			}
+		}
+	} finally {
+		ObjRelease(PropertyStore)
+	}
+	return ""
+}
+
 ; Takes ownership of PropertyStore: releases it before returning, however it returns.
 ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId) {
+	try {
+		return ReadStringProperty(PropertyStore, FormatId, PropertyId)
+	} finally {
+		ObjRelease(PropertyStore)
+	}
+}
+
+; Leaves PropertyStore alone -- the caller owns it.
+ReadStringProperty(PropertyStore, FormatId, PropertyId) {
 	PropVariant := Buffer(PROPVARIANT_SIZE, 0)
 	Value := ""
 	try {
@@ -239,7 +303,6 @@ ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId) {
 		; PropVariantClear is safe on a zeroed PROPVARIANT (VT_EMPTY), so it's correct to
 		; call unconditionally, including when GetValue failed.
 		DllCall("ole32\PropVariantClear", "ptr", PropVariant)
-		ObjRelease(PropertyStore)
 	}
 	return Value
 }
@@ -272,7 +335,7 @@ PrimeAppShortcutIndex() {
 	}
 }
 
-; Returns { Name, Path, IconHandle } for the shortcut advertising this AUMID, or 0.
+; Returns { Name, Path } for the shortcut advertising this AUMID, or 0.
 FindShortcutForAppUserModelId(AppUserModelId) {
 	static RescanIntervalMs := 300000 ; 5 minutes
 	if (AppUserModelId = "") {
@@ -316,8 +379,6 @@ BuildAppShortcutIndex() {
 			Index[AppUserModelId] := {
 				Name: NormalizeShortcutName(NameWithoutExtension),
 				Path: A_LoopFileFullPath,
-				; -1 means "icon not extracted yet"; 0 would mean "tried, and there is none".
-				IconHandle: -1,
 			}
 		}
 	}
@@ -393,15 +454,7 @@ GetLogicalAppDisplayName(Window) {
 	}
 
 	if (Name = "" && ProcessPath != "") {
-		try {
-			Info := FileGetVersionInfo_AW(ProcessPath, ["FileDescription", "ProductName"])
-			if (Info.Has("FileDescription") && Info["FileDescription"] != "") {
-				Name := Info["FileDescription"]
-			} else if (Info.Has("ProductName") && Info["ProductName"] != "") {
-				Name := Info["ProductName"]
-			}
-		} catch {
-		}
+		Name := GetExecutableDisplayName(ProcessPath)
 	}
 
 	if (Name = "") {
@@ -417,6 +470,19 @@ GetLogicalAppDisplayName(Window) {
 	}
 
 	LogicalAppNameCache[Window] := Name
+	return Name
+}
+
+; The executable's own idea of its name, from the version resource that the shell exposes as
+; ordinary properties. Read through the same property store machinery as everything else here;
+; the hand-rolled version-resource reader this replaced truncated 64-bit pointers in three
+; places and only worked while its buffer happened to land below 4 GB.
+GetExecutableDisplayName(ProcessPath) {
+	if ExecutableDisplayNameCache.Has(ProcessPath) {
+		return ExecutableDisplayNameCache[ProcessPath]
+	}
+	Name := GetFirstFileShellProperty(ProcessPath, PKEY_Version_FMTID, PID_FileDescription, PID_ProductName)
+	ExecutableDisplayNameCache[ProcessPath] := Name
 	return Name
 }
 
@@ -445,11 +511,9 @@ GetLogicalAppIconHandle(Window) {
 
 	Shortcut := FindShortcutForAppUserModelId(GetCachedWindowAppUserModelId(Window))
 	if Shortcut {
-		if (Shortcut.IconHandle = -1) {
-			Shortcut.IconHandle := LoadIconFromShortcut(Shortcut.Path)
-		}
-		if Shortcut.IconHandle {
-			return Shortcut.IconHandle
+		IconHandle := GetShortcutIconHandle(Shortcut.Path)
+		if IconHandle {
+			return IconHandle
 		}
 	}
 
@@ -467,6 +531,17 @@ GetLogicalAppIconHandle(Window) {
 		return 0
 	}
 	return LoadIconFromResourceString(ProcessPath ",0")
+}
+
+; Cached by path, so a rebuilt shortcut index reuses icons rather than orphaning them.
+; A cached 0 means "tried, and there is none", which is worth remembering too.
+GetShortcutIconHandle(ShortcutPath) {
+	if ShortcutIconCache.Has(ShortcutPath) {
+		return ShortcutIconCache[ShortcutPath]
+	}
+	IconHandle := LoadIconFromShortcut(ShortcutPath)
+	ShortcutIconCache[ShortcutPath] := IconHandle
+	return IconHandle
 }
 
 LoadIconFromShortcut(ShortcutPath) {
@@ -721,8 +796,41 @@ IsNativeSwitcherSessionActive() {
 }
 
 ;--------------------------------------------------------
+; Tray menu
+;--------------------------------------------------------
+; Both switchers add the same two items pointing at the same project, so the definition
+; lives here rather than being duplicated. The two tray icons stay separate regardless --
+; they are separate processes.
+
+AddSwitcherTrayMenuItems() {
+	A_TrayMenu.Add()  ; Creates a separator line.
+	A_TrayMenu.Add("Report Issue", SwitcherTrayMenuHandler)
+	A_TrayMenu.Add("Project Homepage", SwitcherTrayMenuHandler)
+}
+
+SwitcherTrayMenuHandler(ItemName, ItemPos, MyMenu) {
+	if ItemName = "Report Issue" {
+		Run("https://github.com/1j01/window-switcher/issues")
+	} else if ItemName = "Project Homepage" {
+		Run("https://github.com/1j01/window-switcher/?tab=readme-ov-file#window-switcher")
+	}
+}
+
+;--------------------------------------------------------
 ; Misc. helpers
 ;--------------------------------------------------------
+
+MakeSplash(Title, Text, Duration := 0) {
+	SplashGui := Gui(, Title)
+	SplashGui.Opt("+AlwaysOnTop +Disabled -SysMenu +Owner")  ; +Owner avoids a taskbar button.
+	SplashGui.Add("Text", , Text)
+	SplashGui.Show("NoActivate")  ; NoActivate avoids deactivating the currently active window.
+	if Duration {
+		Sleep(Duration)
+		SplashGui.Destroy()
+	}
+	return SplashGui
+}
 
 DescribeWindow(Window) {
 	try {
@@ -730,37 +838,4 @@ DescribeWindow(Window) {
 	} catch TargetError {
 		return "Nonexistent window"
 	}
-}
-
-FileGetVersionInfo_AW(PEFile := "", Fields := ["FileDescription"]) {
-	; Written by SKAN
-	; https://www.autohotkey.com/forum/viewtopic.php?t=64128       CD:24-Nov-2008 / LM:28-May-2010
-	; Updated for AHK v2 by 1j01                                   2024-02-12 / LM:2024-09-14
-	DLL := "Version\"
-	if !FVISize := DllCall(DLL "GetFileVersionInfoSizeW", "Str", PEFile, "UInt", 0) {
-		throw Error("Unable to retrieve size of file version information.")
-	}
-	FVI := Buffer(FVISize, 0)
-	Translation := 0
-	DllCall(DLL "GetFileVersionInfoW", "Str", PEFile, "Int", 0, "UInt", FVISize, "Ptr", FVI)
-	if !DllCall(DLL "VerQueryValueW", "Ptr", FVI, "Str", "\VarFileInfo\Translation", "UInt*", &Translation, "UInt", 0) {
-		throw Error("Unable to retrieve file version translation information.")
-	}
-	TranslationHex := Buffer(16 + 2)  ; 8 characters + null terminator in UTF-16
-	if !DllCall("wsprintf", "Ptr", TranslationHex, "Str", "%08X", "UInt", NumGet(Translation + 0, "UPtr"), "Cdecl") {
-		throw Error("Unable to format number as hexadecimal.")
-	}
-	TranslationHex := StrGet(TranslationHex, , "UTF-16")
-	TranslationCode := SubStr(TranslationHex, -4) SubStr(TranslationHex, 1, 4)
-	PropertiesMap := Map()
-	for Field in Fields {
-		SubBlock := "\StringFileInfo\" TranslationCode "\" Field
-		InfoPtr := 0
-		if !DllCall(DLL "VerQueryValueW", "Ptr", FVI, "Str", SubBlock, "UIntP", &InfoPtr, "UInt", 0) {
-			continue
-		}
-		Value := DllCall("MulDiv", "UInt", InfoPtr, "Int", 1, "Int", 1, "Str")
-		PropertiesMap[Field] := Value
-	}
-	return PropertiesMap
 }

@@ -1,4 +1,8 @@
-; Requires AutoHotkey v2
+#Requires AutoHotkey v2.0
+; The v2 default is #SingleInstance Prompt, which pops a dialog if a startup task fires
+; twice or the launcher is run again. Replace the old instance instead.
+#SingleInstance Force
+
 #Include "./GuiEnhancerKit.ahk"
 #Include "./logical-app.ahk"
 #Include "./app-switcher-style.ahk"
@@ -29,12 +33,14 @@ SS_WORDELLIPSIS := 0x0000C000
 SS_NOPREFIX := 0x00000080
 
 ; The panel's rounded corners and its translucent 1px border both come from DWM rather than from
-; anything here: `SetBorderless` sets DWMWA_WINDOW_CORNER_PREFERENCE to DWMWCP_ROUND, whose 8 epx
-; radius is the radius the real Alt+Tab panel has, and extends the DWM frame into the client area,
-; which is what draws the border. See the note where it's called for how far to extend it.
+; anything here. See `ApplyAppSwitcherFrame` in app-switcher-style.ahk.
 
 ; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
-DWMWA_USE_HOSTBACKDROPBRUSH := 16
+; 17, not 16. DWMWINDOWATTRIBUTE is one-based (DWMWA_NCRENDERING_ENABLED is 1), so 16 is
+; DWMWA_PASSIVE_UPDATE_MODE -- which is what this used to set, telling DWM to stop updating
+; the window from its redirection surface instead of enabling the host backdrop brush. That
+; is a plausible cause of the "blur-behind doesn't work the first time" problem below.
+DWMWA_USE_HOSTBACKDROPBRUSH := 17
 DWMWA_SYSTEMBACKDROP_TYPE := 38
 ; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type
 DWMSBT_AUTO := 0
@@ -46,18 +52,9 @@ DWMSBT_TABBEDWINDOW := 4
 ;--------------------------------------------------------
 ; Tray Menu
 ;--------------------------------------------------------
+; Shared with window-switcher.ahk; see logical-app.ahk.
 
-A_TrayMenu.Add()  ; Creates a separator line.
-A_TrayMenu.Add("Report Issue", MenuHandler)
-A_TrayMenu.Add("Project Homepage", MenuHandler)
-
-MenuHandler(ItemName, ItemPos, MyMenu) {
-	if ItemName = "Report Issue" {
-		Run("https://github.com/1j01/window-switcher/issues")
-	} else if ItemName = "Project Homepage" {
-		Run("https://github.com/1j01/window-switcher/?tab=readme-ov-file#window-switcher")
-	}
-}
+AddSwitcherTrayMenuItems()
 
 ;--------------------------------------------------------
 
@@ -74,15 +71,33 @@ SetTimer(PrimeAppShortcutIndex, -3000)
 
 #MaxThreadsPerHotkey 2 ; Needed to handle tabbing through apps while the switcher is open
 
-ShowAppSwitcher(Apps) {
+; `AnchorWindow` is the window to place the panel next to -- the one that was active before the
+; switcher opened. `Warmup` shows it without activating it, for the DWM warm-up below.
+ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	CloseAppSwitcher()  ; just in case - don't want to leave behind an old app switcher window
 
 	global AppSwitcherCancelled := false  ; a fresh session starts out uncancelled
+	; Otherwise stale entries pile up for the lifetime of the script -- one per app per
+	; session -- each holding a control belonging to a Gui that no longer exists.
+	FocusRingByHWND.Clear()
 
 	; Everything below comes out of app-switcher-style.ahk, which holds the presentation values
 	; measured off the real Windows 11 Alt+Tab switcher, and the highlight images drawn from them.
 	EnsureAppSwitcherImages()
 	Dark := DarkModeEnabled()
+
+	; Lay the items out to fit the monitor the user is actually looking at, and centre the panel
+	; there. `Gui.Show` with no X/Y auto-centres on the primary monitor, whereas the real
+	; switcher appears wherever the active window is -- and a single row of items ran off the
+	; edge of the screen once there were more apps than the display was wide enough for (nine
+	; at 1920x150%, twenty-three at 5120x150%).
+	;
+	; The work area comes back in physical pixels, while Gui X/Y/W/H are in DPI-scaled units,
+	; so it's converted rather than used directly.
+	WorkArea := AppSwitcherWorkArea(AnchorWindow)
+	AvailableWidth := ScaleToGuiUnits(WorkArea.Width)
+	AvailableHeight := ScaleToGuiUnits(WorkArea.Height)
+	Layout := AppSwitcherPanelLayout(Apps.Length, AvailableWidth, AvailableHeight)
 
 	global AppSwitcher := GuiExt()
 
@@ -112,13 +127,25 @@ ShowAppSwitcher(Apps) {
 	IconSize := AppSwitcherStyle.IconSize
 	LabelInset := AppSwitcherStyle.LabelInset
 	for index, app in Apps {
-		Item := AppSwitcherItemPosition(index)
+		if (index > Layout.ItemsShown) {
+			; More apps than the grid can hold. They arrive in recency order, so the ones
+			; left out are the least recently used.
+			break
+		}
+		Item := AppSwitcherItemPosition(index, Layout.Columns)
 		; The highlight sits behind the icon and the label, and is the control whose image gets
 		; swapped as the selection moves. It reaches `Extent` outside the item box on every side,
 		; the way Windows' ring reaches outside its cards.
 		FocusRingOptions := "x" (Item.X - Extent) " y" (Item.Y - Extent)
 			. " w" AppSwitcherStyle.SelectionBoxSize " h" AppSwitcherStyle.SelectionBoxSize
-		FocusRing := AppSwitcher.Add("Pic", FocusRingOptions, AppSwitcherUnselectedImage)
+		try {
+			FocusRing := AppSwitcher.Add("Pic", FocusRingOptions, AppSwitcherUnselectedImage)
+		} catch {
+			; Same treatment as the icon below: a Picture control that can't load its image
+			; throws "Failed to add control", and losing the highlight is better than losing
+			; the switcher. Adding it without an image keeps the layout and the Tab order.
+			FocusRing := AppSwitcher.Add("Pic", FocusRingOptions)
+		}
 		FocusRingByHWND[app.HWND] := FocusRing
 		; Icon and label are centred as a single group, so the pair sits in the middle of the item
 		; instead of the icon sitting in the middle with the label hanging below it.
@@ -142,29 +169,25 @@ ShowAppSwitcher(Apps) {
 	; while Alt is held (see the Escape hotkey below), i.e. essentially never in practice.
 	AppSwitcher.OnEvent("Escape", CancelAppSwitcher)
 	AppSwitcher.Opt("+AlwaysOnTop -SysMenu -Caption -Border +Owner")
-	Panel := AppSwitcherPanelSize(Apps.Length)
-	AppSwitcher.Show("w" Panel.Width " h" Panel.Height)
 
-	; Enables rounded corners, and the translucent 1px outer border along with them.
-	; Doesn't seem to hide the border if the window is already shown, but `-Border` takes care of that.
-	;
-	; How far the DWM frame is extended into the client area matters more than it looks. Extended
-	; across the whole window -- which is what `SetBorderless` does by default -- the entire panel
-	; becomes glass: everything GDI paints there is composited with a zero alpha and vanishes, and
-	; only what DWM draws behind it is left. That is exactly right when DWM is drawing an acrylic
-	; backdrop, and exactly wrong when the panel is supposed to be a flat colour, where it left the
-	; padding around the items showing the desktop instead of the surface. So the flat case extends
-	; the frame by a single pixel: enough for DWM to still draw the border and round the corners,
-	; while the client area stays ordinary opaque painting.
+	Position := "x" (ScaleToGuiUnits(WorkArea.Left) + (AvailableWidth - Layout.Width) // 2)
+		. " y" (ScaleToGuiUnits(WorkArea.Top) + (AvailableHeight - Layout.Height) // 2)
+	; The warm-up must genuinely show the window -- DWM won't establish composition state for
+	; one that was never shown, so "Hide" here would stop the warm-up warming anything up.
+	; NoActivate is as far as it can be toned down: still shown, but focus stays put.
+	AppSwitcher.Show((Warmup ? "NoActivate " : "") Position " w" Layout.Width " h" Layout.Height)
+
+	; DWM applies these to a window that already exists, and how far the frame is extended
+	; depends on the window's final size, so this has to come after `Show`.
 	if Acrylic {
-		AppSwitcher.SetBorderless(6)
+		ApplyAppSwitcherFrame(AppSwitcher)
 		; Set blur-behind accent effect, matching what the real switcher does when transparency
 		; effects are enabled. (Supported starting with Windows 11 Build 22000.)
 		; Doesn't seem to work the first time. See workaround below.
 		AppSwitcher.SetWindowAttribute(DWMWA_USE_HOSTBACKDROPBRUSH, true)  ; required for DWMSBT_TRANSIENTWINDOW
 		AppSwitcher.SetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
 	} else {
-		AppSwitcher.SetBorderless(6, "", 1, 1, 1, 1)
+		ApplyAppSwitcherFrame(AppSwitcher, 1)
 	}
 }
 
@@ -220,7 +243,7 @@ ConfirmAppSwitcher() {
 ; FIXME: the effect is still not reliably applied. This helps, but it doesn't get at the root cause.
 ; Hm, resizing a test window seems to make the effect work. Maybe I can trigger something like a resize event to make it work reliably.
 ; Or many such events? Since it updates gradually? (Is it an animation, or is it updating only slightly at a given event?)
-ShowAppSwitcher([])
+ShowAppSwitcher([], 0, true)  ; shown but not activated, so it doesn't steal focus at startup
 CloseAppSwitcher()
 
 
@@ -288,9 +311,19 @@ $!+Tab:: {
 	; what the taskbar groups by) and falls back to the process path.
 	ClearLogicalAppCache()
 
-	AllWindows := WinGetList()
-	WindowsByAppId := Map()
-	for Window in AllWindows {
+	; The window that was active before the switcher opens, so the panel can be placed on the
+	; monitor the user is looking at. Captured up front, because showing the panel takes the
+	; foreground away.
+	AnchorWindow := WinExist("A")
+
+	; `WinGetList` returns windows "in order from topmost to bottommost", so the first window
+	; seen for an application is that application's topmost one, and the applications come out
+	; in z-order -- which is the recency order the switcher wants. This used to be
+	; reconstructed after the fact with window groups and an insertion sort, which cost O(N^2)
+	; whole-desktop enumerations per keypress and leaked a window group per comparison.
+	TopWindows := []
+	SeenAppIds := Map()
+	for Window in WinGetList() {
 		AppId := ""
 		try {
 			if Switchable(Window) {
@@ -299,26 +332,12 @@ $!+Tab:: {
 		} catch {
 			; The window may have been destroyed while we were enumerating.
 		}
-		if (AppId = "") {
+		if (AppId = "" || SeenAppIds.Has(AppId)) {
 			continue
 		}
-		if !WindowsByAppId.Has(AppId) {
-			WindowsByAppId[AppId] := []
-		}
-		WindowsByAppId[AppId].Push(Window)
+		SeenAppIds[AppId] := true
+		TopWindows.Push(Window)
 	}
-	TopWindows := []
-	for AppId, WindowsOfApp in WindowsByAppId {
-		; Represent each application with its topmost window.
-		; (Using the specific window IDs found above, rather than `WinGetID("ahk_exe ...")`,
-		; which fails to find a window for File Explorer.)
-		try {
-			TopWindows.Push(Topmost(WindowsOfApp))
-		} catch {
-			continue
-		}
-	}
-	SortByRecency(TopWindows)
 
 	Apps := []
 	for Window in TopWindows {
@@ -331,7 +350,15 @@ $!+Tab:: {
 			})
 		}
 	}
-	ShowAppSwitcher(Apps)
+	if (TopWindows.Length < 2) {
+		; Nothing to switch between, so don't put a panel up at all -- window-switcher.ahk
+		; takes the same shortcut. This counts applications rather than `Apps`, which has
+		; already had any app whose icon couldn't be loaded filtered out of it: a panel
+		; missing an entry is still far better than Alt+Tab silently doing nothing, since
+		; the hook hotkey swallows the keystroke either way.
+		return
+	}
+	ShowAppSwitcher(Apps, AnchorWindow)
 	; Initially select the next app after the currently focused app when opening the switcher.
 	; (Otherwise you always have to press Tab twice to get to the next app.)
 	if GetKeyState("Shift") {
@@ -341,14 +368,14 @@ $!+Tab:: {
 	}
 	UpdateFocusHighlight()
 	; Wait for Alt to be released, which is what commits the selection.
-	; "P" (the physical state) is what KeyWait uses by default anyway, but it's stated
-	; explicitly here because it matters: `Send` above temporarily lifts whichever
-	; modifier the user is holding so that it can send a bare Tab, so the *logical* Alt
-	; state briefly looks released while tabbing through the switcher.
+	; It matters that this is the *physical* state, which is what KeyWait waits on by default:
+	; `Send` above temporarily lifts whichever modifier the user is holding so that it can send
+	; a bare Tab, so the *logical* Alt state briefly looks released while tabbing through the
+	; switcher. (KeyWait's only options are D, L and T -- there is no "P" to ask for explicitly.)
 	if GetKeyState("LAlt", "P") {
-		KeyWait "LAlt", "P"
+		KeyWait "LAlt"
 	} else if GetKeyState("RAlt", "P") { ; just to be sure we don't wait forever in case the key was released quickly
-		KeyWait "RAlt", "P"
+		KeyWait "RAlt"
 	}
 	; Releasing Alt is what confirms the selection. The switcher is normally still open at this
 	; point, but it may have been cancelled with Escape, in which case this does nothing.
@@ -370,68 +397,6 @@ $*Escape:: {
 }
 #HotIf
 
-GroupIDCounter := 0
-Topmost(Windows) {
-	; Returns the highest z-index window in the list
-	; Note: memory leak: there's no way to remove a group or remove an item from a group.
-	global GroupIDCounter
-	GroupID := "TestGroup" GroupIDCounter++
-	for Window in Windows {
-		GroupAdd(GroupID, "ahk_id " Window)
-	}
-	return WinGetID("ahk_group " GroupID)
-}
-SortByRecency(Windows) {
-	; Sort the windows by z-index, which essentially maps to recency.
-	; By comparing subsets of the list, we can order the whole list.
-	SortArray(Windows, (A, B) =>
-		TopmostOfTwo(A, B) == A ? -1 : 1)
-}
-TopmostOfTwo(A, B) {
-	; `Topmost` throws if neither window exists any more, e.g. if one was closed
-	; while the switcher was being built.
-	try {
-		return Topmost([A, B])
-	} catch {
-		return A
-	}
-}
-
-SortArray(Array, ComparisonFunction) {
-	; Insertion sort
-	; Note one-based array indexing
-	i := 1
-	while (i < Array.Length) {
-		j := i
-		while (j > 0 && ComparisonFunction(Array[j], Array[j + 1]) > 0) {
-			Tmp := Array[j]
-			Array[j] := Array[j + 1]
-			Array[j + 1] := Tmp
-			j--
-		}
-		i++
-	}
-	return Array
-}
-
-; MsgBox((
-; 	"SortArray([3, 2, 1], (A, B) => A - B) = " FormatArray(SortArray([3, 2, 1], (A, B) => A - B)) "`n" ; [1, 2, 3]
-; 	"SortArray([3, 2, 1], (A, B) => B - A) = " FormatArray(SortArray([3, 2, 1], (A, B) => B - A)) "`n" ; [3, 2, 1]
-; 	"SortArray([], (A, B) => B - A) = " FormatArray(SortArray([], (A, B) => B - A)) "`n" ; []
-; ))
-
-; FormatArray(Array) {
-; 	Str := "["
-; 	for index, item in Array {
-; 		Str .= item
-; 		if (index < Array.Length) {
-; 			Str .= ", "
-; 		}
-; 	}
-; 	Str .= "]"
-; 	return Str
-; }
-
 ;--------------------------------------------------------
 ; AUTO RELOAD THIS SCRIPT
 ;--------------------------------------------------------
@@ -440,15 +405,4 @@ SortArray(Array, ComparisonFunction) {
 		MakeSplash("AHK Auto-Reload", "`n  Reloading " A_ScriptName "  `n", 500)
 		Reload
 	}
-}
-MakeSplash(Title, Text, Duration := 0) {
-	SplashGui := Gui(, Title)
-	SplashGui.Opt("+AlwaysOnTop +Disabled -SysMenu +Owner")  ; +Owner avoids a taskbar button.
-	SplashGui.Add("Text", , Text)
-	SplashGui.Show("NoActivate")  ; NoActivate avoids deactivating the currently active window.
-	if Duration {
-		Sleep(Duration)
-		SplashGui.Destroy()
-	}
-	return SplashGui
 }

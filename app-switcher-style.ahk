@@ -1,4 +1,4 @@
-; Requires AutoHotkey v2
+#Requires AutoHotkey v2.0
 
 ;--------------------------------------------------------
 ; App Switcher styling
@@ -20,7 +20,7 @@
 ;     is a setting we can read, so the switcher follows it instead of hardcoding either look.
 ;   - The 1px outer border *is* translucent: 200 over white and 47 over black, which solves to
 ;     40% of #757575, i.e. exactly WinUI's `SurfaceStrokeColorDefault`. DWM already draws that
-;     for us (see `SetBorderless` in app-switcher.ahk), so nothing here needs to reproduce it.
+;     for us (see `ApplyAppSwitcherFrame` below), so nothing here needs to reproduce it.
 ;   - The selection ring is a flat, fully opaque #45E532, which is this machine's
 ;     `SystemAccentColorLight2` -- the accent colour, not a fixed blue or green, and not the
 ;     base accent either but the light-on-dark shade of it.
@@ -135,7 +135,8 @@ TransparencyEffectsEnabled() {
 ; Whether the panel should be a DWM acrylic surface rather than a flat one. The real switcher
 ; is acrylic exactly when transparency effects are on, which is also what decides whether the
 ; highlight images can be left transparent -- see EnsureAppSwitcherImages.
-AppSwitcherPanelIsAcrylic() => TransparencyEffectsEnabled() && (VerCompare(A_OSVersion, "10.0.22600") >= 0)
+; 22621 is 22H2, the documented minimum for DWMWA_SYSTEMBACKDROP_TYPE.
+AppSwitcherPanelIsAcrylic() => TransparencyEffectsEnabled() && (VerCompare(A_OSVersion, "10.0.22621") >= 0)
 
 ; Windows keeps eight shades of the accent colour in one binary registry value, four bytes
 ; each (R, G, B and an unused byte), in this order:
@@ -185,22 +186,131 @@ LabelTextColor(Dark) => Dark ? AppSwitcherColors.TextDark : AppSwitcherColors.Te
 ;--------------------------------------------------------
 ; All in Gui units (effective pixels), i.e. what `Gui.Add` and `Gui.Show` want.
 
-; Where an item's box goes, given its one-based position in the row. The box is the icon-and-
-; label area; the highlight is drawn `SelectionExtent` outside it.
-AppSwitcherItemPosition(Index) {
+; The work area of the monitor holding `AnchorWindow`, in physical pixels, falling back to
+; the primary monitor's. This is what the panel is sized against and centred in.
+AppSwitcherWorkArea(AnchorWindow := 0) {
+	if AnchorWindow {
+		CenterX := "", CenterY := ""
+		try {
+			WinGetPos(&WindowX, &WindowY, &WindowWidth, &WindowHeight, AnchorWindow)
+			CenterX := WindowX + WindowWidth // 2
+			CenterY := WindowY + WindowHeight // 2
+		} catch {
+			; The window may be gone, or minimized (which reports nonsense coordinates that
+			; simply won't match any monitor below).
+		}
+		if (CenterX != "") {
+			Loop MonitorGetCount() {
+				try {
+					MonitorGet(A_Index, &Left, &Top, &Right, &Bottom)
+				} catch {
+					continue
+				}
+				if (CenterX >= Left && CenterX < Right && CenterY >= Top && CenterY < Bottom) {
+					return MonitorWorkArea(A_Index)
+				}
+			}
+		}
+	}
+	return MonitorWorkArea(MonitorGetPrimary())
+}
+
+MonitorWorkArea(Index) {
+	MonitorGetWorkArea(Index, &Left, &Top, &Right, &Bottom)
+	return { Left: Left, Top: Top, Width: Right - Left, Height: Bottom - Top }
+}
+
+; How the items are arranged, given the room available on the target monitor.
+;
+; A single row was the original arrangement, and it broke down silently: the panel is
+; `2*28 + N*128 + (N-1)*24` epx wide, so at 1920x150% (1280 epx of room) the ninth app
+; already put items past the edge of the screen, where they could only be tabbed through
+; blind. Windows wraps its cards into a grid instead, so this does too -- as many columns
+; as fit, then as many rows as needed.
+;
+; `ItemsShown` can be less than `ItemCount`, when not even a full grid holds everything.
+; Callers pass apps in recency order, so what gets dropped is the least recently used.
+; (Windows scrolls in this situation; we don't.)
+AppSwitcherPanelLayout(ItemCount, AvailableWidth, AvailableHeight) {
+	Step := AppSwitcherStyle.ItemSize + AppSwitcherStyle.ItemGap
+	Padding := 2 * AppSwitcherStyle.PanelPadding
+	; The gap is added back in because the last column and row don't need one after them.
+	MaxColumns := Max(1, (AvailableWidth - Padding + AppSwitcherStyle.ItemGap) // Step)
+	MaxRows := Max(1, (AvailableHeight - Padding + AppSwitcherStyle.ItemGap) // Step)
+	ItemsShown := Min(Max(ItemCount, 0), MaxColumns * MaxRows)
+	Columns := Max(1, Min(MaxColumns, ItemsShown))
+	Rows := Max(1, Ceil(ItemsShown / Columns))
 	return {
-		X: AppSwitcherStyle.PanelPadding + (Index - 1) * (AppSwitcherStyle.ItemSize + AppSwitcherStyle.ItemGap),
-		Y: AppSwitcherStyle.PanelPadding
+		Columns: Columns,
+		Rows: Rows,
+		ItemsShown: ItemsShown,
+		Width: Padding + Columns * AppSwitcherStyle.ItemSize + (Columns - 1) * AppSwitcherStyle.ItemGap,
+		Height: Padding + Rows * AppSwitcherStyle.ItemSize + (Rows - 1) * AppSwitcherStyle.ItemGap,
 	}
 }
 
-AppSwitcherPanelSize(ItemCount) {
+; Where an item's box goes, given its one-based position and the width of the grid. The box
+; is the icon-and-label area; the highlight is drawn `SelectionExtent` outside it. Items are
+; placed row-major, which is the order the controls are added in, and hence the Tab order.
+AppSwitcherItemPosition(Index, Columns) {
+	Step := AppSwitcherStyle.ItemSize + AppSwitcherStyle.ItemGap
 	return {
-		Width: 2 * AppSwitcherStyle.PanelPadding
-			+ ItemCount * AppSwitcherStyle.ItemSize
-			+ Max(0, ItemCount - 1) * AppSwitcherStyle.ItemGap,
-		Height: 2 * AppSwitcherStyle.PanelPadding + AppSwitcherStyle.ItemSize
+		X: AppSwitcherStyle.PanelPadding + Mod(Index - 1, Columns) * Step,
+		Y: AppSwitcherStyle.PanelPadding + ((Index - 1) // Columns) * Step
 	}
+}
+
+;--------------------------------------------------------
+; The panel's frame
+;--------------------------------------------------------
+; The rounded corners and the translucent 1px outer border are both DWM's work, not ours.
+;
+; This used to go through GuiEnhancerKit's `SetBorderless`, which does the same attribute
+; setting but *also* subclasses the window to handle WM_NCCALCSIZE / WM_NCHITTEST /
+; WM_ACTIVATE. None of that is wanted here: the Gui is created `-Caption -Border`, so there
+; is no non-client frame to strip and no reason for a transient panel to have resize
+; borders. The subclass was also actively harmful -- its registry is keyed by HWND and
+; cleaned up on the Gui's `Close` event, which `Gui.Destroy` never raises, so every session
+; leaked a callback thunk, and once Windows recycled an HWND the stale handlers ran against
+; a destroyed Gui and threw "Error: Gui has no window."
+
+; Note that DWMWINDOWATTRIBUTE is one-based: DWMWA_NCRENDERING_ENABLED is 1, not 0. Verified
+; by measurement -- DWMWA_EXTENDED_FRAME_BOUNDS is the only one of 8 and 9 that returns a RECT
+; matching the window, and it is 9; DWMWA_CLOAKED is likewise 14 rather than 13.
+; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
+DWMWA_TRANSITIONS_FORCEDISABLED := 3
+DWMWA_WINDOW_CORNER_PREFERENCE := 33
+; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_window_corner_preference
+DWMWCP_ROUND := 2
+
+; `Inset` is how far to extend the DWM frame into the client area, or "" for "all the way".
+;
+; How far matters more than it looks. Extended across the whole window, the entire panel
+; becomes glass: everything GDI paints there is composited with a zero alpha and vanishes,
+; leaving only what DWM draws behind it. That is exactly right when DWM is drawing an
+; acrylic backdrop, and exactly wrong when the panel is meant to be a flat colour, where it
+; left the padding around the items showing the desktop instead of the surface. So the flat
+; case extends the frame by a single pixel: enough for DWM to still draw the border and
+; round the corners, while the client area stays ordinary opaque painting.
+;
+; The window has to be shown already when this is called.
+ApplyAppSwitcherFrame(PanelGui, Inset := "") {
+	; No open/close animation on a panel that appears and disappears with a keypress. (This is
+	; what `SetBorderless` set, and it's kept for behavioural parity with it.)
+	PanelGui.SetWindowAttribute(DWMWA_TRANSITIONS_FORCEDISABLED, true)
+	; Rounded corners, and the translucent 1px outer border along with them. DWMWCP_ROUND's
+	; radius is 8 epx, which is the radius the real Alt+Tab panel has.
+	if (VerCompare(A_OSVersion, "10.0.22000") >= 0) {
+		PanelGui.SetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+	}
+	Rect := Buffer(16, 0)
+	DllCall("GetWindowRect", "ptr", PanelGui.Hwnd, "ptr", Rect)
+	Horizontal := Inset = "" ? NumGet(Rect, 8, "int") - NumGet(Rect, 0, "int") : Inset
+	Vertical := Inset = "" ? NumGet(Rect, 12, "int") - NumGet(Rect, 4, "int") : Inset
+	; struct MARGINS { int cxLeftWidth, cxRightWidth, cyTopHeight, cyBottomHeight; }
+	Margins := Buffer(16, 0)
+	NumPut("int", Horizontal, "int", Horizontal, "int", Vertical, "int", Vertical, Margins)
+	DllCall("dwmapi\DwmExtendFrameIntoClientArea", "ptr", PanelGui.Hwnd, "ptr", Margins)
 }
 
 ;--------------------------------------------------------
@@ -224,6 +334,9 @@ AppSwitcherPanelSize(ItemCount) {
 
 ; Effective pixels to real ones, matching how AutoHotkey scales Gui coordinates.
 ScaleToPixels(Value) => Round(Value * A_ScreenDPI / 96)
+; ...and back, for turning physical measurements (monitor work areas, WinGetPos) into the
+; Gui units that `Gui.Add` and `Gui.Show` take.
+ScaleToGuiUnits(Value) => Round(Value * 96 / A_ScreenDPI)
 
 AppSwitcherImageDir := A_Temp "\AppSwitcherImages\"
 ; Cached, and keyed by everything the images depend on, so that changing the accent colour or
@@ -244,14 +357,24 @@ EnsureAppSwitcherImages() {
 	if (Key = AppSwitcherImageKey) {
 		return
 	}
-	if !DirExist(AppSwitcherImageDir) {
-		DirCreate(AppSwitcherImageDir)
-	}
 	Size := ScaleToPixels(AppSwitcherStyle.SelectionBoxSize)
 	Selected := AppSwitcherImageDir "selected-" Key ".png"
 	Unselected := AppSwitcherImageDir "unselected-" Key ".png"
-	WriteSelectionImage(Selected, Size, Plate, Accent, Inner)
-	WritePlateImage(Unselected, Size, Plate)
+	try {
+		if !DirExist(AppSwitcherImageDir) {
+			DirCreate(AppSwitcherImageDir)
+		}
+		WriteSelectionImage(Selected, Size, Plate, Accent, Inner)
+		WritePlateImage(Unselected, Size, Plate)
+	} catch {
+		; A_Temp not being writable shouldn't be fatal; fall through to the check below.
+	}
+	; None of the GDI+ calls report failure, and DirCreate can throw, so confirm the files are
+	; actually there before caching the key. Caching it regardless would mean a single failed
+	; write left the switcher permanently pointing Picture controls at files that don't exist.
+	if (!FileExist(Selected) || !FileExist(Unselected)) {
+		return
+	}
 	AppSwitcherSelectedImage := Selected
 	AppSwitcherUnselectedImage := Unselected
 	AppSwitcherImageKey := Key

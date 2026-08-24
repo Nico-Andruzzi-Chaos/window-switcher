@@ -34,6 +34,7 @@ Each utility is lightning fast, compliments each other, and integrates smoothly 
   - Ten browser windows are a single entry, while each installed PWA is its own entry, with its own name and icon. See [Logical applications](#logical-applications).
 - Custom UI, designed to match the native Windows 11 <kbd>Alt+Tab</kbd> switcher
   - Follows the system light/dark setting, accent colour, transparency-effects setting and display scaling
+  - Opens on the monitor holding the active window, wrapping into a grid to fit its work area
   - Acrylic blur-behind when transparency effects are on, a flat surface colour when they're off, which is what Windows itself does
   - Restyleable by editing the measured presentation values in `app-switcher-style.ahk`
 
@@ -171,10 +172,16 @@ Two mechanisms handle it:
 ### Application Switcher
 
 - 🎨 The blur-behind effect doesn't always work. (Usually it works when triggering the app switcher a second time.)
-- 🙈 UWP apps are not shown in the app switcher.
-  - This is likely easier to solve than the issue with the window switcher, but Microsoft doesn't make it easy! They frankly dropped the ball when it comes to compatibility when introducing UWP apps.
-- Can sometimes get an error `Error: Gui has no window.` at `Pic := AppSwitcher.FocusedCtrl`
-  - ❓ I don't know what caused this or if it's still a problem. If you run into this or any other issues, please let me know.
+- 🙈 UWP apps used to be missing from the app switcher, because they report no icon of their own.
+  Matching windows to Start Menu shortcuts by AUMID should now give them a name and an icon like
+  anything else -- worth re-testing. See [Logical applications](#logical-applications).
+- More apps than fit on screen are dropped rather than scrolled. The panel wraps into a grid
+  sized to the monitor's work area, and if even a full grid can't hold every app, the least
+  recently used ones are left out. Windows scrolls its switcher instead.
+- On a multi-monitor setup with *different* scaling per monitor, the panel is sized for the
+  primary monitor's DPI, since that is the only DPI AutoHotkey reports (`A_ScreenDPI`). The
+  panel opens on the monitor holding the active window, so this shows up as a panel scaled
+  wrongly rather than one in the wrong place.
 
 ## License
 
@@ -193,6 +200,9 @@ It's unfortunate, since the app switcher is the one that has dependencies that I
     - No longer needed: the selection highlight is drawn at runtime with GDI+ from the values in `app-switcher-style.ahk`, so the app switcher ships no images. (`FileInstall` was the mechanism while it did.)
   - [x] Fix app crashing, usually silently but occasionally showing an "critical error" message with very little information
     - Narrowed it down to a memory issue with `wsprintf` where it would write a null terminator past the end of the buffer
+    - The rest of that function has since been deleted: it truncated 64-bit pointers in three
+      more places, and the executable's `FileDescription` / `ProductName` are now read through
+      the shell property store instead, like everything else in `logical-app.ahk`
   - [ ] 🙈 Not all apps are shown (e.g. Chrome, Firefox, and VS Code are missing)
     - Apparently `WM_GETICON` is failing when compiled (returning `0`)
       - This may be fixed now: icons are looked up from the app model / shortcut / executable before falling back to `WM_GETICON`, so a window that reports no icon of its own can still be shown. Worth re-testing when compiled.
@@ -201,10 +211,13 @@ It's unfortunate, since the app switcher is the one that has dependencies that I
         - Resolved a different way: shortcuts are matched to windows by AUMID rather than by figuring out what launched a process. See [Logical applications](#logical-applications).
   - [ ] Script is sending Tab to itself recursively, triggering a warning message about many hotkeys being triggered in a period short time
     - Do hotkeys work differently when compiled?? Is it maybe designed to avoid responding to hotkeys originating from `AutoHotkey.exe`?
-  - [ ] "Error: Gui has no window."
-    - Does multithreading work differently when compiled??
-    - Actually, this might be related to the Tab hotkey issue. That could explain why it's getting what appears like a timing issue. (Although I don't know for sure it's a timing issue.)
-    - I might have a fix for this (3414d66940d5c43ef88884ae5298457422800721)
+  - [x] "Error: Gui has no window."
+    - Not a threading or timing problem after all. `GuiEnhancerKit`'s `SetBorderless` subclasses
+      the window and keys its bookkeeping by HWND, cleaning up on the Gui's `Close` event --
+      which `Gui.Destroy` never raises. So each session leaked a callback, and once Windows
+      recycled an HWND the stale handlers ran `WinRedraw` against a destroyed Gui, which is
+      exactly that error. The panel is `-Caption -Border` already, so it never needed the
+      subclass; the DWM attributes it did need are set directly now. See `ApplyAppSwitcherFrame`.
 - [ ] Create GitHub release
 - [ ] Simplify installation instructions
 - [ ] Customize tray icons (both scripts currently use AutoHotkey's default icon; any custom icon should still read as an AutoHotkey script)
