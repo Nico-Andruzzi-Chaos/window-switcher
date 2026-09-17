@@ -109,6 +109,38 @@ IDI_APPLICATION := 32512
 ; DWM hides some windows without clearing WS_VISIBLE. See IsWindowCloaked.
 DWMWA_CLOAKED := 14
 
+; The shell's application views.
+;
+; Windows 11 does not decide what goes in Alt+Tab by enumerating windows and applying the
+; classic style rules -- it iterates the shell's IApplicationView objects. That is why
+; ITaskbarList::DeleteTab, WS_EX_TOOLWINDOW and DWMWA_CLOAK all fail to hide a UWP window:
+; every one of them acts on the HWND, which the immersive path never consults. Measured on
+; Windows 11 against live Settings and Microsoft Store windows -- DeleteTab returns S_OK and
+; changes nothing, WS_EX_TOOLWINDOW applies to the frame and changes nothing (with or
+; without a hide/show cycle to force re-evaluation), and DwmSetWindowAttribute(DWMWA_CLOAK)
+; fails outright with E_ACCESSDENIED.
+;
+; Each view carries a "show in switchers" flag, the undocumented twin of
+; AppWindow.IsShownInSwitchers, which Microsoft documents as controlling whether a window
+; "will appear in various system representations, such as ALT+TAB and taskbar". It can be
+; set for another process's window through the immersive shell -- the same route every
+; virtual desktop tool uses to move other applications' windows between desktops.
+;
+; These interfaces are undocumented, so the vtable slots are the load-bearing part. They
+; match the declarations shared by the established virtual-desktop projects, and both
+; accessors are confirmed by measurement: reading slot 27 for a Settings window returns 1,
+; and writing 0 to slot 28 reads back as 0.
+CLSID_ImmersiveShell := "{C2F03A33-21F5-47FA-B4BB-156362A2F239}"
+IID_IServiceProvider := "{6D5140C1-7436-11CE-8034-00AA006009FA}"
+IID_IApplicationViewCollection := "{1841C6D7-4F9D-42C0-AF41-8747538F10E5}"
+IServiceProvider_QueryService := 3
+IApplicationViewCollection_GetViewForHwnd := 6
+IApplicationView_GetShowInSwitchers := 27
+IApplicationView_SetShowInSwitchers := 28
+
+; A UWP app's frame window, which is the only kind that needs the view treatment above.
+UWP_FRAME_WINDOW_CLASS := "ApplicationFrameWindow"
+
 ; GETPROPERTYSTOREFLAGS
 GPS_DEFAULT := 0
 
@@ -875,6 +907,85 @@ IsWindowCloaked(Window) {
 		return false
 	}
 	return Cloaked != 0
+}
+
+; A GUID string as the 16 raw bytes the COM APIs take.
+GuidBuffer(GuidString) {
+	Guid := Buffer(16, 0)
+	if (DllCall("ole32\CLSIDFromString", "wstr", GuidString, "ptr", Guid, "int") != 0) {
+		throw ValueError("Not a GUID: " GuidString)
+	}
+	return Guid
+}
+
+; The shell's view collection, bound once and kept for the life of the script. Returns 0 if
+; it can't be reached, so callers degrade to "this window can't be hidden" rather than
+; throwing on a hotkey thread.
+;
+; This must not be called from inside a keyboard hook callback: a cross-process COM call
+; from there fails with RPC_E_CANTCALLOUT_ININPUTSYNCCALL. AutoHotkey runs hotkey bodies
+; after the hook returns, so calling it from a hotkey is fine.
+ApplicationViewCollectionPointer := 0
+ApplicationViewCollection() {
+	global ApplicationViewCollectionPointer
+	if ApplicationViewCollectionPointer {
+		return ApplicationViewCollectionPointer
+	}
+	try {
+		ImmersiveShell := ComObject(CLSID_ImmersiveShell, IID_IServiceProvider)
+		Collection := 0
+		; The service id and the interface id are the same GUID for this one.
+		if (ComCall(IServiceProvider_QueryService, ImmersiveShell
+			, "ptr", GuidBuffer(IID_IApplicationViewCollection)
+			, "ptr", GuidBuffer(IID_IApplicationViewCollection)
+			, "ptr*", &Collection, "int") = 0) {
+			ApplicationViewCollectionPointer := Collection
+		}
+	} catch {
+		ApplicationViewCollectionPointer := 0
+	}
+	return ApplicationViewCollectionPointer
+}
+
+; The shell's view object for a window, or 0. The caller owns the reference and must
+; `ObjRelease` it.
+GetApplicationView(Window) {
+	Collection := ApplicationViewCollection()
+	if !Collection {
+		return 0
+	}
+	View := 0
+	try {
+		if (ComCall(IApplicationViewCollection_GetViewForHwnd, Collection
+			, "ptr", Window, "ptr*", &View, "int") != 0) {
+			return 0
+		}
+	} catch {
+		return 0
+	}
+	return View
+}
+
+; Whether the shell lists this view in Alt+Tab, or -1 if it can't be read.
+GetViewShownInSwitchers(View) {
+	Shown := -1
+	try {
+		if (ComCall(IApplicationView_GetShowInSwitchers, View, "int*", &Shown, "int") != 0) {
+			return -1
+		}
+	} catch {
+		return -1
+	}
+	return Shown
+}
+
+; Returns true only if the flag was actually written.
+SetViewShownInSwitchers(View, Shown) {
+	try {
+		return ComCall(IApplicationView_SetShowInSwitchers, View, "int", Shown ? 1 : 0, "int") = 0
+	} catch {
+		return false
+	}
 }
 
 ExpandEnvironmentStrings(Text) {

@@ -28,8 +28,9 @@
 ;   especially with taskbar button labels enabled, as it animates the taskbar buttons collapsing and expanding.
 ; - Some windows are not hidden from the task switcher, such as the Task Manager, due to permission errors.
 ;   - Running as administrator fixes this.
-; - UWP windows, such as Windows's Settings app, are not filtered out either.
-;   - They don't play well with any of the methods I've tried (WinHide, WinSetExStyle, ITaskbarList.DeleteTab).
+; - UWP windows (Settings, the Microsoft Store) ignore DeleteTab entirely, because Windows 11
+;   builds the switcher list from the shell's application views rather than from the windows.
+;   They are hidden through the view instead; see logical-app.ahk.
 
 ; TODO: remove windows from task switcher only, and not the task bar.
 ; Adding WS_EX_TOOLWINDOW is much faster than WinHide/WinShow (it makes the actual interaction instantaneous!),
@@ -129,19 +130,48 @@ FilteredWindowSwitcher() {
   BeginNativeSwitcherSession()
   try {
     for Window in WindowsToHide {
+      Hidden := { Window: Window, Deleted: false, View: 0, ShownInSwitchers: -1 }
       try {
         if (!TaskbarListInitialized) {
           ComCall(ITaskbarList_VTable.HrInit, TaskbarList)
           TaskbarListInitialized := True
         }
         ComCall(ITaskbarList_VTable.DeleteTab, TaskbarList, "ptr", Window)
-
-        TempHiddenWindows.Push(Window)
+        Hidden.Deleted := true
       } catch {
         ; Deliberately silent. It's better to leave an extraneous window in the switcher than
         ; to throw an error message up while other windows are hidden. DeleteTab fails
         ; silently anyway for windows we lack the rights to touch (the Task Manager, unless
-        ; running as administrator) and for UWP apps.
+        ; running as administrator).
+      }
+      ; DeleteTab does nothing whatsoever for a UWP window -- it returns S_OK and leaves it
+      ; in the switcher -- because Windows 11 builds that list from the shell's application
+      ; views rather than from the windows themselves. Those have to be hidden through the
+      ; view instead. See the notes in logical-app.ahk.
+      ;
+      ; Only UWP frames need this, and there are rarely more than one or two open, so the
+      ; cross-process calls stay off the common path.
+      try {
+        NeedsView := WinGetClass(Window) = UWP_FRAME_WINDOW_CLASS
+      } catch {
+        NeedsView := false
+      }
+      if NeedsView {
+        View := GetApplicationView(Window)
+        if View {
+          Shown := GetViewShownInSwitchers(View)
+          ; Only touch a view that is currently shown, and only record it once the write
+          ; has actually succeeded, so restoring can never turn on a flag that was off.
+          if (Shown = 1 && SetViewShownInSwitchers(View, false)) {
+            Hidden.View := View
+            Hidden.ShownInSwitchers := Shown
+          } else {
+            ObjRelease(View)
+          }
+        }
+      }
+      if (Hidden.Deleted || Hidden.View) {
+        TempHiddenWindows.Push(Hidden)
       }
     }
     ; `!` matches either Alt, so wait on whichever one is physically held. Waiting on LAlt
@@ -175,11 +205,19 @@ FilteredWindowSwitcher() {
 RestoreHiddenWindows() {
   global TempHiddenWindows
   Messages := []
-  for Window in TempHiddenWindows {
-    try {
-      ComCall(ITaskbarList_VTable.AddTab, TaskbarList, "ptr", Window)
-    } catch Error as e {
-      Messages.Push("Failed to unhide window from the task switcher.`n`n" DescribeWindow(Window) "`n`n" e.Message)
+  for Hidden in TempHiddenWindows {
+    ; The view flag first: it is the one that, left set, would keep a window out of Alt+Tab
+    ; for the rest of the session.
+    if Hidden.View {
+      try SetViewShownInSwitchers(Hidden.View, Hidden.ShownInSwitchers)
+      try ObjRelease(Hidden.View)
+    }
+    if Hidden.Deleted {
+      try {
+        ComCall(ITaskbarList_VTable.AddTab, TaskbarList, "ptr", Hidden.Window)
+      } catch Error as e {
+        Messages.Push("Failed to unhide window from the task switcher.`n`n" DescribeWindow(Hidden.Window) "`n`n" e.Message)
+      }
     }
   }
   TempHiddenWindows.Length := 0

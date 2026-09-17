@@ -16,6 +16,8 @@ Each utility is lightning fast, compliments each other, and integrates smoothly 
 - <kbd>Alt+`</kbd> to switch between windows of the same application
 - <kbd>Shift</kbd> to cycle in reverse
 - <kbd>Escape</kbd> to cancel
+- Hides only what it should: Task Manager and other elevated windows when running as
+  administrator, and UWP windows through the shell's own application-view flag
 - Matches windows by *logical application*, not by process
   - The windows of an installed PWA stay separate from the browser's own windows, even though they share `chrome.exe`. See [Logical applications](#logical-applications).
 - ✨ Uses the native Windows window switching UI ✨
@@ -161,8 +163,13 @@ Two mechanisms handle it:
   - ❌ I don't know of any way to hide windows from the task switcher without hiding them from the taskbar.
 - Some windows are not hidden from the task switcher, such as the Task Manager, due to permission errors.
   - 🛡️✅ Running as administrator fixes this.
-- UWP windows, such as Windows's Settings app, are not filtered out either.
-  - ❌ They don't play well with any of the methods I've tried (`WinHide`, `WinSetExStyle`, `ITaskbarList.DeleteTab`).
+- ✅ UWP windows (Settings, the Microsoft Store) used to leak into the filtered switcher no
+  matter what, because `ITaskbarList::DeleteTab` returns `S_OK` for them and does nothing.
+  The reason is that Windows 11 doesn't build its Alt+Tab list by enumerating windows at all
+  — it iterates the shell's *application views*, which never consult the window. So every
+  window-level method is a dead end, which is why `WinHide`, `WinSetExStyle` and `DeleteTab`
+  all failed. They're now hidden through the view instead, with the same flag the shell uses
+  itself; see the notes in `logical-app.ahk`.
 
 ### Both
 
