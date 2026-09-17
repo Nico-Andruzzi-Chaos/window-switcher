@@ -166,15 +166,31 @@ Two mechanisms handle it:
 
 ### Both
 
+- 🛡️ **While a window belonging to an administrator process is focused, neither shortcut works at all**,
+  and Windows' own <kbd>Alt+Tab</kbd> takes over. Windows does not let a program intercept keystrokes on
+  their way to a more privileged program, so the hotkeys simply never fire. It isn't specific to these
+  scripts, and nothing they can do from an ordinary process fixes it.
+  - The apps this comes up with are the ones that quietly run elevated: **Task Manager**, Registry Editor,
+    Event Viewer, Services, Disk Management and the other management consoles, installers, UAC prompts,
+    and any terminal or editor started with "Run as administrator".
+  - Switching *to* such an app works fine. It's only switching *away* from one that doesn't, which is why
+    this tends to be noticed as "Alt+Tab is broken in Task Manager" rather than as a permissions problem.
+  - 🛡️✅ Running the scripts as administrator fixes it — see [Running on Startup](#running-on-startup),
+    which sets that up without a UAC prompt at every logon. When they aren't elevated, the tray icon's
+    tooltip says so, and its menu explains why.
 - Pressing <kbd>Alt+`</kbd> *while the application switcher is already open* isn't handled specially: the window switcher will start filtering underneath the app switcher's UI. Release <kbd>Alt</kbd> before pressing <kbd>Alt+`</kbd>.
 - Windows that don't expose an AUMID are grouped by executable instead, so if an application sets one on some of its windows but not others, those windows are treated as two applications. See [Logical applications](#logical-applications).
 
 ### Application Switcher
 
 - 🎨 The blur-behind effect doesn't always work. (Usually it works when triggering the app switcher a second time.)
-- 🙈 UWP apps used to be missing from the app switcher, because they report no icon of their own.
-  Matching windows to Start Menu shortcuts by AUMID should now give them a name and an icon like
-  anything else -- worth re-testing. See [Logical applications](#logical-applications).
+- 🙈 UWP apps (Settings, Microsoft Store, Calculator and the rest) used to be missing from the app
+  switcher entirely. Every source of an icon comes up empty for them: they publish no icon of their
+  own, they have no Start Menu shortcut to borrow one from, and the executable behind their window is
+  `ApplicationFrameHost.exe`, which contains no icons at all -- so they were dropped from the panel,
+  silently. They're now looked up by AUMID in `shell:AppsFolder`, the virtual folder behind the Start
+  Menu's app list, which is the one place a packaged app's real name and icon exist. (It also stopped
+  them being labelled "Application Frame Host" on the way.) See [Logical applications](#logical-applications).
 - More apps than fit on screen are dropped rather than scrolled. The panel wraps into a grid
   sized to the monitor's work area, and if even a full grid can't hold every app, the least
   recently used ones are left out. Windows scrolls its switcher instead.

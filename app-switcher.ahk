@@ -349,20 +349,24 @@ $!+Tab:: {
 	Apps := []
 	for Window in TopWindows {
 		IconHandle := GetLogicalAppIconHandle(Window)
-		if (IconHandle) {
-			Apps.Push({
-				Icon: IconHandle,
-				Title: GetLogicalAppDisplayName(Window),
-				HWND: Window,
-			})
+		if (!IconHandle) {
+			; An application the user can see on screen has to appear in the switcher, so a
+			; placeholder stands in rather than the entry being dropped. Nothing is expected
+			; to reach this now that packaged apps resolve through the AppsFolder, but an
+			; application silently missing from Alt+Tab is a hard bug to even notice, let
+			; alone diagnose, and a generic icon makes it obvious instead.
+			IconHandle := GenericAppIconHandle()
 		}
+		Apps.Push({
+			Icon: IconHandle,
+			Title: GetLogicalAppDisplayName(Window),
+			HWND: Window,
+		})
 	}
-	if (TopWindows.Length < 2) {
+	if (Apps.Length < 2) {
 		; Nothing to switch between, so don't put a panel up at all -- window-switcher.ahk
-		; takes the same shortcut. This counts applications rather than `Apps`, which has
-		; already had any app whose icon couldn't be loaded filtered out of it: a panel
-		; missing an entry is still far better than Alt+Tab silently doing nothing, since
-		; the hook hotkey swallows the keystroke either way.
+		; takes the same shortcut. Note that the hook hotkey swallows the keystroke either
+		; way, so returning here means Alt+Tab does nothing at all.
 		return
 	}
 	ShowAppSwitcher(Apps, AnchorWindow)

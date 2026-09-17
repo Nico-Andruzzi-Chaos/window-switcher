@@ -88,6 +88,27 @@ VT_LPWSTR := 31
 IID_IPropertyStore := "{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}"
 IPropertyStore_GetValue := 5
 
+; IShellItem::GetDisplayName is the 6th vtable entry, after IUnknown's three and
+; BindToHandler/GetParent. IShellItemImageFactory::GetImage is the first entry of its own,
+; the interface having no other methods.
+IID_IShellItem := "{43826D1E-E718-42EE-BC55-A1E261C37BFE}"
+IShellItem_GetDisplayName := 5
+IID_IShellItemImageFactory := "{BCC18B79-BA16-442F-80C4-8A59C30C463B}"
+IShellItemImageFactory_GetImage := 3
+
+; SIGDN_NORMALDISPLAY asks for the name as the shell would show it ("Microsoft Store"),
+; rather than a parsing name. SIIGBF_ICONONLY forbids substituting a document thumbnail for
+; the app's icon; notably SIIGBF_BIGGERSIZEOK is *not* passed, so the shell returns exactly
+; the size asked for rather than whatever larger asset it happens to hold.
+SIGDN_NORMALDISPLAY := 0
+SIIGBF_ICONONLY := 0x4
+
+; The system's stock "some application" icon, used when every other source comes up empty.
+IDI_APPLICATION := 32512
+
+; DWM hides some windows without clearing WS_VISIBLE. See IsWindowCloaked.
+DWMWA_CLOAKED := 14
+
 ; GETPROPERTYSTOREFLAGS
 GPS_DEFAULT := 0
 
@@ -129,6 +150,16 @@ ExecutableDisplayNameCache.CaseSense := false ; paths are case-insensitive on Wi
 ; cached on the entry itself would be orphaned -- leaked, since nothing calls DestroyIcon
 ; on it -- every time the index is rebuilt.
 ShortcutIconCache := Map()
+
+; AppsFolder names and icons, keyed by AUMID and never cleared. Binding a shell item costs
+; about as much as binding a property store, and this tier is only reached by applications
+; that have nothing else to offer, so caching turns it into a one-off per application. As
+; with the caches above, a cached "" or 0 records "asked, and there is nothing", which is
+; worth remembering too. The icons are HICONs we created, and therefore ours.
+AppsFolderNameCache := Map()
+AppsFolderNameCache.CaseSense := false ; AUMIDs are compared case-insensitively by the shell
+AppsFolderIconCache := Map()
+AppsFolderIconCache.CaseSense := false
 
 ClearLogicalAppCache() {
 	LogicalAppIdCache.Clear()
@@ -412,6 +443,132 @@ NormalizeShortcutName(Name) {
 }
 
 ;--------------------------------------------------------
+; AUMID -> AppsFolder
+;--------------------------------------------------------
+; "shell:AppsFolder" is the virtual folder behind the Start Menu's app list, and it is the
+; only place a packaged (UWP/Store) application's name and icon exist: such an app has no
+; shortcut on disk for the index above to find, and the executable hosting its window is
+; ApplicationFrameHost.exe, which carries no icon resources and no useful version info. It
+; answers for ordinary applications and PWAs too, but those are already served by the tiers
+; ahead of it, so in practice this is the packaged-app tier.
+;
+; Measured: "Microsoft.WindowsStore_8wekyb3d8bbwe!App" -> "Microsoft Store" plus a 32x32
+; 32-bit icon, and an AUMID naming nothing installed fails cleanly with ERROR_FILE_NOT_FOUND.
+
+; The size the app switcher draws icons at. Asking the shell for exactly this saves
+; rescaling a larger asset by hand.
+APPS_FOLDER_ICON_SIZE := 32
+
+; Returns the name the shell gives an AUMID in the AppsFolder, or "".
+GetAppsFolderDisplayName(AppUserModelId) {
+	if (AppUserModelId = "") {
+		return ""
+	}
+	if AppsFolderNameCache.Has(AppUserModelId) {
+		return AppsFolderNameCache[AppUserModelId]
+	}
+	Name := ""
+	ShellItem := BindAppsFolderItem(AppUserModelId, IID_IShellItem)
+	if ShellItem {
+		try {
+			StringPointer := 0
+			if (ComCall(IShellItem_GetDisplayName, ShellItem, "uint", SIGDN_NORMALDISPLAY, "ptr*", &StringPointer, "int") = 0 && StringPointer) {
+				Name := StrGet(StringPointer, "UTF-16")
+				DllCall("ole32\CoTaskMemFree", "ptr", StringPointer)
+			}
+		} catch {
+			Name := ""
+		} finally {
+			ObjRelease(ShellItem)
+		}
+	}
+	AppsFolderNameCache[AppUserModelId] := Name
+	return Name
+}
+
+; Returns an HICON for an AUMID's AppsFolder entry, or 0. The handle is ours, and is cached
+; rather than destroyed, so that repeatedly opening the switcher can't leak one.
+GetAppsFolderIconHandle(AppUserModelId) {
+	if (AppUserModelId = "") {
+		return 0
+	}
+	if AppsFolderIconCache.Has(AppUserModelId) {
+		return AppsFolderIconCache[AppUserModelId]
+	}
+	IconHandle := 0
+	ImageFactory := BindAppsFolderItem(AppUserModelId, IID_IShellItemImageFactory)
+	if ImageFactory {
+		try {
+			Bitmap := 0
+			; GetImage takes its SIZE *by value*, and an 8-byte struct is passed the same way
+			; a 64-bit integer is on both architectures, so packing the two LONGs into one is
+			; the whole of the marshalling.
+			PackedSize := (APPS_FOLDER_ICON_SIZE << 32) | APPS_FOLDER_ICON_SIZE
+			if (ComCall(IShellItemImageFactory_GetImage, ImageFactory, "int64", PackedSize, "uint", SIIGBF_ICONONLY, "ptr*", &Bitmap, "int") = 0 && Bitmap) {
+				IconHandle := IconFromBitmap(Bitmap)
+				DllCall("gdi32\DeleteObject", "ptr", Bitmap)
+			}
+		} catch {
+			IconHandle := 0
+		} finally {
+			ObjRelease(ImageFactory)
+		}
+	}
+	AppsFolderIconCache[AppUserModelId] := IconHandle
+	return IconHandle
+}
+
+; Binds one AppsFolder entry to the requested interface, or returns 0.
+BindAppsFolderItem(AppUserModelId, InterfaceId) {
+	InterfaceGuid := Buffer(16, 0)
+	if (DllCall("ole32\CLSIDFromString", "wstr", InterfaceId, "ptr", InterfaceGuid, "int") != 0) {
+		return 0
+	}
+	ShellItem := 0
+	try {
+		; Asking for an "int" return rather than the default HRESULT return type makes the
+		; common failure -- an AUMID that names no installed application -- a value to check
+		; instead of an exception to unwind.
+		HResult := DllCall("shell32\SHCreateItemFromParsingName", "wstr", "shell:AppsFolder\" AppUserModelId, "ptr", 0, "ptr", InterfaceGuid, "ptr*", &ShellItem, "int")
+	} catch {
+		return 0
+	}
+	return (HResult = 0) ? ShellItem : 0
+}
+
+; Converts an HBITMAP into an HICON, so that the AppsFolder tier hands back the same kind of
+; handle as every other tier and the panel's picture controls don't have to care where an
+; icon came from. Returns 0 on failure. The bitmap stays the caller's to delete.
+IconFromBitmap(Bitmap) {
+	; BITMAP { LONG bmType; LONG bmWidth; LONG bmHeight; LONG bmWidthBytes;
+	;          WORD bmPlanes; WORD bmBitsPixel; LPVOID bmBits; }
+	BitmapInfo := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+	if !DllCall("gdi32\GetObjectW", "ptr", Bitmap, "int", BitmapInfo.Size, "ptr", BitmapInfo) {
+		return 0
+	}
+	Width := NumGet(BitmapInfo, 4, "int")
+	Height := NumGet(BitmapInfo, 8, "int")
+	; CreateIconIndirect wants a mask even for a bitmap that carries its own alpha channel.
+	; A freshly created monochrome bitmap is all zeroes, which means "opaque everywhere" and
+	; leaves the alpha to do the work.
+	Mask := DllCall("gdi32\CreateBitmap", "int", Width, "int", Height, "uint", 1, "uint", 1, "ptr", 0, "ptr")
+	if !Mask {
+		return 0
+	}
+	; ICONINFO { BOOL fIcon; DWORD xHotspot; DWORD yHotspot; HBITMAP hbmMask; HBITMAP hbmColor; }
+	; The two handles are pointer-aligned, so on 64-bit they sit past four bytes of padding.
+	IconInfo := Buffer(A_PtrSize = 8 ? 32 : 20, 0)
+	NumPut("int", 1, IconInfo, 0)
+	NumPut("ptr", Mask, IconInfo, A_PtrSize = 8 ? 16 : 12)
+	NumPut("ptr", Bitmap, IconInfo, A_PtrSize = 8 ? 24 : 16)
+	; CreateIconIndirect copies both bitmaps rather than taking ownership of them, so the mask
+	; is ours to delete as soon as it returns.
+	IconHandle := DllCall("user32\CreateIconIndirect", "ptr", IconInfo, "ptr")
+	DllCall("gdi32\DeleteObject", "ptr", Mask)
+	return IconHandle
+}
+
+;--------------------------------------------------------
 ; Logical application display metadata
 ;--------------------------------------------------------
 
@@ -422,9 +579,11 @@ NormalizeShortcutName(Name) {
 ;      windows announce their own name, e.g. Chrome reports "Google Chrome")
 ;   2. The name of the Start Menu / pinned shortcut with the same AUMID (this is what
 ;      names installed PWAs, e.g. "Google Chat", "Google Meet")
-;   3. The executable's FileDescription, then its ProductName
-;   4. The window title
-;   5. The executable's filename
+;   3. The name of the AUMID's AppsFolder entry (this is what names packaged apps, e.g.
+;      "Settings", "Microsoft Store", which have no shortcut on disk)
+;   4. The executable's FileDescription, then its ProductName
+;   5. The window title
+;   6. The executable's filename
 ;
 ; Note that the executable's version info is preferred over the window title even
 ; though the title is more specific: window titles name the *document* ("Inbox (3) -
@@ -445,6 +604,10 @@ GetLogicalAppDisplayName(Window) {
 		if Shortcut {
 			Name := Shortcut.Name
 		}
+	}
+
+	if (Name = "") {
+		Name := GetAppsFolderDisplayName(GetCachedWindowAppUserModelId(Window))
 	}
 
 	ProcessPath := ""
@@ -493,11 +656,14 @@ GetExecutableDisplayName(ProcessPath) {
 ;      the profile icon for browser windows)
 ;   2. The icon of the Start Menu / pinned shortcut with the same AUMID (this is what
 ;      gives each installed PWA its real icon instead of Chrome's)
-;   3. The window's own icon (WM_GETICON, then the window class icon)
-;   4. The executable's first icon
+;   3. The icon of the AUMID's AppsFolder entry (this is what gives packaged apps their
+;      icon; without it Settings and the Microsoft Store have none at all, since every
+;      other step comes back empty for a window hosted by ApplicationFrameHost.exe)
+;   4. The window's own icon (WM_GETICON, then the window class icon)
+;   5. The executable's first icon
 ;
-; Icons from steps 1, 2 and 4 are extracted by us and cached, so repeatedly opening the
-; switcher can't leak handles. Icons from step 3 belong to the other application and
+; Icons from steps 1, 2, 3 and 5 are made by us and cached, so repeatedly opening the
+; switcher can't leak handles. Icons from step 4 belong to the other application and
 ; must not be destroyed.
 GetLogicalAppIconHandle(Window) {
 	if !Window {
@@ -515,6 +681,11 @@ GetLogicalAppIconHandle(Window) {
 		if IconHandle {
 			return IconHandle
 		}
+	}
+
+	IconHandle := GetAppsFolderIconHandle(GetCachedWindowAppUserModelId(Window))
+	if IconHandle {
+		return IconHandle
 	}
 
 	IconHandle := GetWindowIconHandle(Window)
@@ -634,6 +805,18 @@ LoadIconFromResourceString(Resource) {
 	return IconHandle
 }
 
+; The system's stock application icon, for an application whose own icon can't be found by
+; any means. Like the window icons below it belongs to the system and must not be destroyed.
+; Showing a placeholder is the point: an application the user can see on screen should never
+; be missing from the switcher just because its icon couldn't be resolved.
+GenericAppIconHandle() {
+	static IconHandle := 0
+	if !IconHandle {
+		IconHandle := DllCall("user32\LoadIconW", "ptr", 0, "ptr", IDI_APPLICATION, "ptr")
+	}
+	return IconHandle
+}
+
 ; Returns the icon a window advertises for itself, or 0. This handle belongs to the
 ; other application, so it must not be destroyed.
 GetWindowIconHandle(Window) {
@@ -680,6 +863,20 @@ GetClassLongPtr(Window, Index) {
 	return DllCall("GetClassLongW", "Ptr", Window, "int", Index, "uint")
 }
 
+; True if DWM is hiding the window even though it's still WS_VISIBLE. Treats any failure as
+; "not cloaked", so that a window is only ever excluded on a definite answer.
+IsWindowCloaked(Window) {
+	Cloaked := 0
+	try {
+		if (DllCall("dwmapi\DwmGetWindowAttribute", "ptr", Window, "uint", DWMWA_CLOAKED, "int*", &Cloaked, "uint", 4, "int") != 0) {
+			return false
+		}
+	} catch {
+		return false
+	}
+	return Cloaked != 0
+}
+
 ExpandEnvironmentStrings(Text) {
 	if !InStr(Text, "%") {
 		return Text
@@ -706,6 +903,13 @@ Switchable(Window) {
 	; TODO: priority of conditions (I couldn't find a definitive source, but someone gives an order in one of the answers)
 	ExStyle := WinGetExStyle(Window)
 	if ExStyle & WS_EX_TOOLWINDOW {
+		return false
+	}
+	; Cloaked windows are still WS_VISIBLE, so WinGetList hands them to us: suspended UWP
+	; frames, the shell's own CoreWindows (TextInputHost, ShellExperienceHost) and anything
+	; on another virtual desktop. None of them are in the task switcher. A minimized UWP
+	; window is cloaked as well and *is* in the task switcher, hence the exemption.
+	if (IsWindowCloaked(Window) && WinGetMinMax(Window) != -1) {
 		return false
 	}
 	if ExStyle & WS_EX_APPWINDOW {
@@ -802,8 +1006,19 @@ IsNativeSwitcherSessionActive() {
 ; lives here rather than being duplicated. The two tray icons stay separate regardless --
 ; they are separate processes.
 
+; Named once, since the handler matches on it.
+ELEVATION_TRAY_ITEM_NAME := "Why doesn't this work over Task Manager?"
+
 AddSwitcherTrayMenuItems() {
 	A_TrayMenu.Add()  ; Creates a separator line.
+	; Windows won't let a process hook keystrokes that are on their way to a window of a
+	; more privileged process, so while an elevated window is focused the hotkeys don't fire
+	; at all and Windows' own Alt+Tab takes over. That looks exactly like the script having
+	; crashed, so say so somewhere the user can find it rather than leaving them guessing.
+	if !A_IsAdmin {
+		A_IconTip := StrReplace(A_ScriptName, ".ahk") " (not running as administrator: the shortcuts are inactive while an administrator window is focused)"
+		A_TrayMenu.Add(ELEVATION_TRAY_ITEM_NAME, SwitcherTrayMenuHandler)
+	}
 	A_TrayMenu.Add("Report Issue", SwitcherTrayMenuHandler)
 	A_TrayMenu.Add("Project Homepage", SwitcherTrayMenuHandler)
 }
@@ -813,6 +1028,18 @@ SwitcherTrayMenuHandler(ItemName, ItemPos, MyMenu) {
 		Run("https://github.com/1j01/window-switcher/issues")
 	} else if ItemName = "Project Homepage" {
 		Run("https://github.com/1j01/window-switcher/?tab=readme-ov-file#window-switcher")
+	} else if (ItemName = ELEVATION_TRAY_ITEM_NAME) {
+		MsgBox(
+			"Windows doesn't let a program intercept keystrokes on their way to a program running with "
+			. "higher privileges, so while a window belonging to an administrator process is focused, "
+			. "Alt+Tab and Alt+`` never reach this script and Windows' own switcher takes over.`n`n"
+			. "Task Manager is the one that usually gives it away, because it runs as administrator "
+			. "without asking. Registry Editor, Event Viewer, Services, installers and anything started "
+			. "with `"Run as administrator`" all behave the same way.`n`n"
+			. "Switching *to* one of those apps works; it's only switching away from one that doesn't.`n`n"
+			. "Running this script as administrator fixes it. See `"Running on Startup`" in the readme "
+			. "for how to do that without a UAC prompt at every logon."
+			, "Why don't the shortcuts work over Task Manager?", 0x40)
 	}
 }
 
