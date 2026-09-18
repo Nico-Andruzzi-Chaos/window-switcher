@@ -112,12 +112,20 @@ wizard can't set most of what follows.
 - Start in: `C:\path\to` — *without* quotes. This field rejects them, and that's a common
   reason for a task that looks like it ran and did nothing.
 
-**Conditions** — clear both power boxes:
+**Conditions** — clear both power boxes, and mind the order, because the dialog makes this
+one easy to get wrong:
 
-- *Start the task only if the computer is on AC power*, which otherwise means no switchers at
-  all after booting a laptop on battery.
-- *Stop if the computer switches to battery power*, which otherwise stops both switchers the
-  moment you unplug.
+1. *Stop if the computer switches to battery power* first, which otherwise stops both
+   switchers the moment you unplug.
+2. *Start the task only if the computer is on AC power* second, which otherwise means no
+   switchers at all after booting a laptop on battery.
+
+Clearing the AC box greys the battery-stop box out, but greying a box doesn't clear it — the
+task keeps whatever that setting already was, and it starts out on. The service checks the
+two independently, with none of the dialog's parent-and-child arrangement, so a greyed-out
+"stop on battery" still stops the task on battery. If the AC box is already clear and the
+one below it is greyed and ticked, tick the AC box to re-enable it, clear it, then clear the
+AC box again.
 
 **Settings**
 
