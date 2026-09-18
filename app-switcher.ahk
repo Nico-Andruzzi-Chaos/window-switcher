@@ -236,7 +236,17 @@ ConfirmAppSwitcher() {
 	; Normally `AppSwitcher.FocusedCtrl` exists at this point,
 	; but it may not exist if focus changes while the switcher is open
 	; such as by pressing Win+D to show the desktop, then releasing Win.
-	SelectedPic := Switcher.FocusedCtrl
+	;
+	; The `try` covers a case the snapshot above doesn't: reading the global once stops it
+	; being seen as `0`, but not the Gui behind it being destroyed. `CancelAppSwitcher` can
+	; still run in the gap, and reaching into a destroyed Gui throws "Gui has no window" --
+	; an error dialog at the exact moment the user lets go of Alt. A session cancelled that
+	; late commits nothing either way, so there is nothing to do but leave.
+	try {
+		SelectedPic := Switcher.FocusedCtrl
+	} catch {
+		return
+	}
 	SelectedHWND := 0
 	if SelectedPic {
 		Parts := StrSplit(SelectedPic.Name, "PicForAppWithHWND")
@@ -287,7 +297,16 @@ UpdateFocusHighlight() {
 		LastFocusHighlight := 0
 		return
 	}
-	Pic := Switcher.FocusedCtrl
+	; The `if !Switcher` above only rules out the global having been zeroed *before* it was
+	; read. Escape can destroy the Gui in the gap since, and this runs directly after
+	; `Send "{Tab}"` -- precisely when the user may press it -- so this is the last bare Gui
+	; access on the path to a dialog appearing mid-keypress.
+	try {
+		Pic := Switcher.FocusedCtrl
+	} catch {
+		LastFocusHighlight := 0
+		return
+	}
 	if !Pic {
 		; Probably shouldn't happen, GENERALLY, with logic outside this function focusing the app switcher if it's not focused
 		; but maybe it could lose focus immediately after being focused with `WinActivate`,

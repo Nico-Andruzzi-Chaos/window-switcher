@@ -205,8 +205,12 @@ FilteredWindowSwitcher() {
     } catch {
       Messages := []
     }
-    ReleaseSyntheticAlt()
-    EndNativeSwitcherSession()
+    ; The other two get the same treatment, and for the same reason: a throw out of the Alt
+    ; release would skip the session release below it and leave the mutex held for the rest
+    ; of the run, with app-switcher.ahk passing Alt+Tab straight through to Windows forever
+    ; after. This matches what `OnSwitcherExit` already does.
+    try ReleaseSyntheticAlt()
+    try EndNativeSwitcherSession()
   }
 
   for message in Messages {
@@ -245,8 +249,12 @@ ReleaseSyntheticAlt() {
   if !SyntheticAltDown {
     return
   }
-  SyntheticAltDown := false
+  ; Cleared only once the key is actually up. Clearing first meant that a `Send` which threw
+  ; left the flag claiming the Alt was released while it was still physically down, so the
+  ; `OnExit` fallback -- the entire reason the flag exists -- would no-op and leave it held.
+  ; A redundant `{LAlt Up}` costs nothing; a missed one is the bug this is here to prevent.
   Send "{LAlt Up}"
+  SyntheticAltDown := false
 }
 
 ; DeleteTab's effect isn't tied to this process's lifetime, so if the script exits or reloads
