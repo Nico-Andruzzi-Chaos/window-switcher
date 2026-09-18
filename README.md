@@ -165,11 +165,11 @@ Two mechanisms handle it:
   - ❌ I don't know of any way to hide windows from the task switcher without hiding them from the taskbar.
 - Some windows are not hidden from the task switcher, such as the Task Manager, due to permission errors.
   - 🛡️✅ Running as administrator fixes this.
-- If the script is *killed* mid-<kbd>Alt+`</kbd> (End Task, a crash, or being replaced by a second
-  copy of itself), the windows it hid stay hidden from the taskbar and <kbd>Alt+Tab</kbd> until they
-  are recreated. Both mechanisms it uses — `ITaskbarList::DeleteTab` and the shell view's
-  "show in switchers" flag — outlive the process that set them, and a killed process runs neither
-  its `finally` nor its `OnExit` handler. Exiting the script normally restores everything.
+- If the script is *killed* mid-<kbd>Alt+`</kbd> (End Task, or a crash), the windows it hid stay
+  hidden from the taskbar and <kbd>Alt+Tab</kbd> until they are recreated. Both mechanisms it uses
+  — `ITaskbarList::DeleteTab` and the shell view's "show in switchers" flag — outlive the process
+  that set them, and a killed process runs neither its `finally` nor its `OnExit` handler. Exiting
+  the script normally restores everything, as does replacing it by running the launcher again.
 
 ### Both
 
