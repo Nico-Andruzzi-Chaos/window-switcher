@@ -61,6 +61,11 @@ TaskbarListInitialized := False
 
 TempHiddenWindows := []
 
+; Whether the synthetic Alt that holds the native task switcher open is currently down.
+; Tracked rather than inferred, so that exiting mid-session can release it -- see
+; `ReleaseSyntheticAlt` and the `OnExit` at the bottom of this file.
+SyntheticAltDown := false
+
 ; The `$` prefix forces the keyboard hook, so that these can never be triggered by
 ; keystrokes another AutoHotkey script generates (including this script's own).
 $!+`:: {
@@ -70,7 +75,7 @@ $!`:: {
   FilteredWindowSwitcher()
 }
 FilteredWindowSwitcher() {
-  global TaskbarListInitialized, TempHiddenWindows
+  global TaskbarListInitialized, TempHiddenWindows, SyntheticAltDown
   if NativeSwitcherSessionOwnedHere() {
     ; Needs #MaxThreadsPerHotkey 2 to handle Alt+`+`+`... to tab through windows with `, while waiting for Alt to be released
     ; Needs {Blind} to handle Alt+Shift+` to go in reverse
@@ -123,8 +128,6 @@ FilteredWindowSwitcher() {
     return
   }
 
-  ; Assigned in the `finally` below; declared here so it always exists.
-  Messages := []
   ; Held for as long as the native task switcher is up, so that app-switcher.ahk passes
   ; physical Tab presses through to it instead of opening the application switcher.
   BeginNativeSwitcherSession()
@@ -180,6 +183,7 @@ FilteredWindowSwitcher() {
     ; same breath, having hidden and unhidden every window for nothing. The synthetic Alt
     ; stays LAlt either way: that one is ours, and it's only there to hold the switcher open.
     PhysicalAlt := GetKeyState("LAlt", "P") ? "LAlt" : (GetKeyState("RAlt", "P") ? "RAlt" : "")
+    SyntheticAltDown := true
     Send "{LAlt Down}"
     Send "{Blind}{Tab}" ; Tab or Shift+Tab to go in reverse
     if PhysicalAlt {
@@ -190,9 +194,23 @@ FilteredWindowSwitcher() {
     ; taskbar and the task switcher is far worse than whatever error got us here, a stuck
     ; logical Alt is worse still, and releasing the session matters so that a failure can't
     ; leave app-switcher.ahk permanently passing Alt+Tab through to Windows.
-    Messages := RestoreHiddenWindows()
-    Send "{LAlt Up}"
-    EndNativeSwitcherSession()
+    ;
+    ; Each step is therefore isolated from the others. `RestoreHiddenWindows` builds its
+    ; messages with `DescribeWindow`, which only catches `TargetError` -- so a window we
+    ; aren't allowed to query (`WinGetProcessPath` on an elevated process) could throw
+    ; straight out of here, skipping the two lines below and leaving Alt logically held and
+    ; the mutex held forever, which is exactly the state this block exists to prevent.
+    try {
+      Messages := RestoreHiddenWindows()
+    } catch {
+      Messages := []
+    }
+    ; The other two get the same treatment, and for the same reason: a throw out of the Alt
+    ; release would skip the session release below it and leave the mutex held for the rest
+    ; of the run, with app-switcher.ahk passing Alt+Tab straight through to Windows forever
+    ; after. This matches what `OnSwitcherExit` already does.
+    try ReleaseSyntheticAlt()
+    try EndNativeSwitcherSession()
   }
 
   for message in Messages {
@@ -224,10 +242,40 @@ RestoreHiddenWindows() {
   return Messages
 }
 
+; Lets go of the Alt this script pressed to hold the native switcher open. Safe to call when
+; it isn't down, and only ever releases an Alt we synthesized ourselves.
+ReleaseSyntheticAlt() {
+  global SyntheticAltDown
+  if !SyntheticAltDown {
+    return
+  }
+  ; Cleared only once the key is actually up. Clearing first meant that a `Send` which threw
+  ; left the flag claiming the Alt was released while it was still physically down, so the
+  ; `OnExit` fallback -- the entire reason the flag exists -- would no-op and leave it held.
+  ; A redundant `{LAlt Up}` costs nothing; a missed one is the bug this is here to prevent.
+  Send "{LAlt Up}"
+  SyntheticAltDown := false
+}
+
 ; DeleteTab's effect isn't tied to this process's lifetime, so if the script exits or reloads
 ; while windows are hidden -- Ctrl+S mid-Alt-hold, a crash, logging off -- they would stay
 ; missing from the taskbar until they happen to be recreated.
-OnExit((*) => RestoreHiddenWindows())
+;
+; Neither is the synthetic Alt: `Send "{LAlt Down}"` puts a key down in the *system's*
+; keyboard state, and the process ending doesn't undo it. Exiting mid-session -- being
+; replaced by `#SingleInstance Force` when the launcher is run again, a reload, an error
+; dialog the user answers with Exit -- therefore left Alt logically held with nothing around
+; to release it, so every subsequent keystroke became an Alt shortcut until the user happened
+; to tap Alt themselves. `OnExit` doesn't unwind the suspended thread's `finally`, so it has
+; to do this itself.
+OnExit(OnSwitcherExit)
+
+OnSwitcherExit(*) {
+  ; Isolated from each other for the same reason as in the `finally`: whichever one fails,
+  ; the other still has to happen.
+  try RestoreHiddenWindows()
+  try ReleaseSyntheticAlt()
+}
 
 ;--------------------------------------------------------
 ; AUTO RELOAD THIS SCRIPT

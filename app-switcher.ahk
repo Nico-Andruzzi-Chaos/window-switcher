@@ -3,7 +3,6 @@
 ; twice or the launcher is run again. Replace the old instance instead.
 #SingleInstance Force
 
-#Include "./GuiEnhancerKit.ahk"
 #Include "./logical-app.ahk"
 #Include "./app-switcher-style.ahk"
 
@@ -43,11 +42,7 @@ SS_NOPREFIX := 0x00000080
 DWMWA_USE_HOSTBACKDROPBRUSH := 17
 DWMWA_SYSTEMBACKDROP_TYPE := 38
 ; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type
-DWMSBT_AUTO := 0
-DWMSBT_NONE := 1
-DWMSBT_MAINWINDOW := 2
 DWMSBT_TRANSIENTWINDOW := 3
-DWMSBT_TABBEDWINDOW := 4
 
 ;--------------------------------------------------------
 ; Tray Menu
@@ -80,6 +75,9 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	; Otherwise stale entries pile up for the lifetime of the script -- one per app per
 	; session -- each holding a control belonging to a Gui that no longer exists.
 	FocusRingByHWND.Clear()
+	; Cleared alongside the map it indexes into: it points at a control of the Gui that
+	; `CloseAppSwitcher` above just destroyed.
+	global LastFocusHighlight := 0
 
 	; Everything below comes out of app-switcher-style.ahk, which holds the presentation values
 	; measured off the real Windows 11 Alt+Tab switcher, and the highlight images drawn from them.
@@ -98,13 +96,13 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	Layout := AppSwitcherPanelLayout(Apps.Length
 		, ScaleToGuiUnits(WorkArea.Width), ScaleToGuiUnits(WorkArea.Height))
 
-	global AppSwitcher := GuiExt()
+	global AppSwitcher := Gui()
 
 	AppSwitcher.SetFont(Format("c{:06X} s{:d}", LabelTextColor(Dark), AppSwitcherStyle.LabelFontSize), "Segoe UI")
 	if Dark {
-		AppSwitcher.SetDarkTitle()  ; needed for dark window background apparently, even though there's no title bar
+		SetDarkTitle(AppSwitcher)  ; needed for dark window background apparently, even though there's no title bar
 	}
-	AppSwitcher.SetDarkMenu()  ; should be unnecessary
+	SetDarkMenu()  ; should be unnecessary
 
 	; Windows draws this panel as acrylic when "Transparency effects" is on and as a flat surface
 	; colour when it's off -- which is why the reference screenshots show a byte-identical #202020
@@ -131,7 +129,7 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 			; left out are the least recently used.
 			break
 		}
-		Item := AppSwitcherItemPosition(index, Layout.Columns)
+		Item := AppSwitcherItemPosition(index, Layout.Columns, Layout.ItemsShown)
 		; The highlight sits behind the icon and the label, and is the control whose image gets
 		; swapped as the selection moves. It reaches `Extent` outside the item box on every side,
 		; the way Windows' ring reaches outside its cards.
@@ -191,8 +189,8 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 		; Set blur-behind accent effect, matching what the real switcher does when transparency
 		; effects are enabled. (Supported starting with Windows 11 Build 22000.)
 		; Doesn't seem to work the first time. See workaround below.
-		AppSwitcher.SetWindowAttribute(DWMWA_USE_HOSTBACKDROPBRUSH, true)  ; required for DWMSBT_TRANSIENTWINDOW
-		AppSwitcher.SetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
+		SetDwmWindowAttribute(AppSwitcher.Hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, true)  ; required for DWMSBT_TRANSIENTWINDOW
+		SetDwmWindowAttribute(AppSwitcher.Hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
 	} else {
 		ApplyAppSwitcherFrame(AppSwitcher, 1)
 	}
@@ -226,23 +224,46 @@ CancelAppSwitcher(*) {
 ; This is the only path that activates an application.
 ConfirmAppSwitcher() {
 	global AppSwitcher, AppSwitcherCancelled
+	; Read the global once: the Escape hotkey can zero it between the check below and the
+	; use after it, which would make that use throw.
+	Switcher := AppSwitcher
 	; Don't commit a cancelled session. Also don't commit a switcher that's already gone, which
 	; happens when a newer Alt+Tab session has opened and closed one in the meantime; between
 	; them, a stale hotkey thread can never activate anything.
-	if (!AppSwitcher || AppSwitcherCancelled) {
+	if (!Switcher || AppSwitcherCancelled) {
 		return
 	}
 	; Normally `AppSwitcher.FocusedCtrl` exists at this point,
 	; but it may not exist if focus changes while the switcher is open
 	; such as by pressing Win+D to show the desktop, then releasing Win.
-	SelectedPic := AppSwitcher.FocusedCtrl
+	;
+	; The `try` covers a case the snapshot above doesn't: reading the global once stops it
+	; being seen as `0`, but not the Gui behind it being destroyed. `CancelAppSwitcher` can
+	; still run in the gap, and reaching into a destroyed Gui throws "Gui has no window" --
+	; an error dialog at the exact moment the user lets go of Alt. A session cancelled that
+	; late commits nothing either way, so there is nothing to do but leave.
+	try {
+		SelectedPic := Switcher.FocusedCtrl
+	} catch {
+		return
+	}
 	SelectedHWND := 0
 	if SelectedPic {
-		SelectedHWND := Integer(StrSplit(SelectedPic.Name, "PicForAppWithHWND")[2])
+		Parts := StrSplit(SelectedPic.Name, "PicForAppWithHWND")
+		if (Parts.Length >= 2 && IsInteger(Parts[2])) {
+			SelectedHWND := Integer(Parts[2])
+		}
 	}
 	CloseAppSwitcher()
 	if SelectedHWND {
-		WinActivate(SelectedHWND)
+		try {
+			WinActivate(SelectedHWND)
+		} catch {
+			; The window was captured when the panel was built and can have closed while the
+			; user held Alt -- a dialog that dismissed itself, an app that crashed. Throwing
+			; here would put an error box up at the exact moment they let go of Alt, which is
+			; a worse outcome than the switch quietly not happening.
+		}
 	}
 }
 
@@ -257,7 +278,12 @@ CloseAppSwitcher()
 LastFocusHighlight := 0
 UpdateFocusHighlight() {
 	global LastFocusHighlight
-	Pic := AppSwitcher.FocusedCtrl
+	; Read the global once, rather than dereferencing it repeatedly. `CancelAppSwitcher`
+	; zeroes it from the Escape hotkey's thread, and that thread can interrupt the
+	; `Send "{Tab}"` immediately before each of this function's two call sites -- at which
+	; point `AppSwitcher.FocusedCtrl` is `0.FocusedCtrl`, an unhandled exception, and an
+	; error dialog on top of the switcher the user is still holding Alt for.
+	Switcher := AppSwitcher
 	if LastFocusHighlight {
 		try {
 			LastFocusHighlight.Value := AppSwitcherUnselectedImage
@@ -265,14 +291,49 @@ UpdateFocusHighlight() {
 			; App switcher closed and destroyed the control
 		}
 	}
+	if !Switcher {
+		; Cancelled out from under us. The control we just unhighlighted belongs to a Gui
+		; that no longer exists, so forget it rather than reaching for it again next time.
+		LastFocusHighlight := 0
+		return
+	}
+	; The `if !Switcher` above only rules out the global having been zeroed *before* it was
+	; read. Escape can destroy the Gui in the gap since, and this runs directly after
+	; `Send "{Tab}"` -- precisely when the user may press it -- so this is the last bare Gui
+	; access on the path to a dialog appearing mid-keypress.
+	try {
+		Pic := Switcher.FocusedCtrl
+	} catch {
+		LastFocusHighlight := 0
+		return
+	}
 	if !Pic {
 		; Probably shouldn't happen, GENERALLY, with logic outside this function focusing the app switcher if it's not focused
 		; but maybe it could lose focus immediately after being focused with `WinActivate`,
 		; or immedaitely after showing the app switcher.
 		return
 	}
-	FocusRing := FocusRingByHWND[Integer(StrSplit(Pic.Name, "PicForAppWithHWND")[2])]
-	FocusRing.Value := AppSwitcherSelectedImage
+	; Only the icon pics are named, and only they are tabstops, so this normally always
+	; resolves. But a focused control left over from a session that has already been torn
+	; down would parse to a key the map no longer holds, and an unguarded `Map` lookup
+	; throws -- so take the same view of it as of everything else here: if the answer isn't
+	; there, leave the highlight alone rather than failing loudly mid-keypress.
+	Parts := StrSplit(Pic.Name, "PicForAppWithHWND")
+	if (Parts.Length < 2 || !IsInteger(Parts[2])) {
+		return
+	}
+	Key := Integer(Parts[2])
+	if !FocusRingByHWND.Has(Key) {
+		return
+	}
+	FocusRing := FocusRingByHWND[Key]
+	try {
+		; `AppSwitcherSelectedImage` is "" if the highlight images couldn't be written at
+		; all -- see `EnsureAppSwitcherImages` -- and assigning that to a Picture throws.
+		FocusRing.Value := AppSwitcherSelectedImage
+	} catch {
+		return
+	}
 	LastFocusHighlight := FocusRing
 }
 
@@ -283,6 +344,18 @@ UpdateFocusHighlight() {
 $!Tab::
 $!+Tab:: {
 	global AppSwitcher
+	; Nothing on this thread can afford a timer landing in the middle of it, and one is aimed
+	; squarely at it: `FindShortcutForAppUserModelId` hands its Start Menu rescan to
+	; `SetTimer(..., -1)` to keep that ~1 s scan off the thread that has to put the panel up.
+	; But a negative period only means "after 1 ms", and a thread becomes interruptible once
+	; it has run 15 ms -- which this one has, long before the app-building loop that schedules
+	; the rescan reaches its end. Without this the scan simply ran at an arbitrary point
+	; mid-loop rather than at the call site: the same stall, only harder to find.
+	;
+	; Blocking timers for the length of the keypress is what actually defers it. The rebuild
+	; runs the moment this thread ends, with the panel long since shown and the switch already
+	; committed -- a few seconds' delay to a five minute rescan.
+	Thread "NoTimers", true
 	if IsNativeSwitcherSessionActive() {
 		; The same-app window switcher currently has the native task switcher open.
 		; Pass Tab through so that it cycles through that, instead of opening this

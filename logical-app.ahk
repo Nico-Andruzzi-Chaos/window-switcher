@@ -43,17 +43,8 @@ ICON_BIG := 1
 ICON_SMALL := 0
 ICON_SMALL2 := 2
 
-GCW_ATOM := -32 ; Retrieves an ATOM value that uniquely identifies the window class. This is the same atom that the RegisterClassEx function returns.
-GCL_CBCLSEXTRA := -20 ; Retrieves the size, in bytes, of the extra memory associated with the class.
-GCL_CBWNDEXTRA := -18 ; Retrieves the size, in bytes, of the extra window memory associated with each window in the class. For information on how to access this memory, see GetWindowLongPtr.
-GCLP_HBRBACKGROUND := -10 ; Retrieves a handle to the background brush associated with the class.
-GCLP_HCURSOR := -12 ; Retrieves a handle to the cursor associated with the class.
 GCLP_HICON := -14 ; Retrieves a handle to the icon associated with the class.
 GCLP_HICONSM := -34 ; Retrieves a handle to the small icon associated with the class.
-GCLP_HMODULE := -16 ; Retrieves a handle to the module that registered the class.
-GCLP_MENUNAME := -8 ; Retrieves the pointer to the menu name string. The string identifies the menu resource associated with the class.
-GCL_STYLE := -26 ; Retrieves the window-class style bits.
-GCLP_WNDPROC := -24 ; Retrieves the address of the window procedure, or a handle representing the address of the window procedure. You must use the CallWindowProc function to call the window procedure.
 
 WS_CHILD := 0x40000000
 ; WS_THICKFRAME := 0x00040000
@@ -79,7 +70,6 @@ PID_FileDescription := 3 ; System.FileDescription
 PID_ProductName := 7 ; System.Software.ProductName
 
 ; VARENUM members that a string-valued PROPVARIANT can use.
-VT_EMPTY := 0
 VT_BSTR := 8
 VT_LPWSTR := 31
 
@@ -275,28 +265,10 @@ GetWindowShellProperty(Window, FormatId, PropertyId) {
 	return ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId)
 }
 
-; Same, for a file (used to read the AUMID that Start Menu shortcuts advertise).
-GetFileShellProperty(Path, FormatId, PropertyId) {
-	if (Path = "") {
-		return ""
-	}
-	InterfaceId := Buffer(16, 0)
-	if (DllCall("ole32\CLSIDFromString", "wstr", IID_IPropertyStore, "ptr", InterfaceId, "int") != 0) {
-		return ""
-	}
-	PropertyStore := 0
-	try {
-		HResult := DllCall("shell32\SHGetPropertyStoreFromParsingName", "wstr", Path, "ptr", 0, "uint", GPS_DEFAULT, "ptr", InterfaceId, "ptr*", &PropertyStore, "int")
-	} catch {
-		return ""
-	}
-	if (HResult != 0 || !PropertyStore) {
-		return ""
-	}
-	return ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId)
-}
-
-; Reads several properties from one property store, returning the first non-empty value.
+; Same, for a file: reads properties from one property store, returning the first non-empty
+; value. Used to read the AUMID that Start Menu shortcuts advertise, and an executable's
+; version info.
+;
 ; Binding the store is the expensive part -- measured at 6+ ms per bind on a local
 ; executable -- and this runs on the interactive Alt+Tab path, once per application without
 ; an AUMID. So properties that are alternatives to one another are read in a single call
@@ -404,21 +376,41 @@ FindShortcutForAppUserModelId(AppUserModelId) {
 	if (AppUserModelId = "") {
 		return 0
 	}
+	global ShortcutIndexBuildTickCount
 	if !ShortcutIndexByAppUserModelId {
+		; Cold start only, and `PrimeAppShortcutIndex` normally gets here first. Paid
+		; inline because the alternative is a first switcher with no PWA names in it.
 		BuildAppShortcutIndex()
 	}
-	if ShortcutIndexByAppUserModelId.Has(AppUserModelId) {
-		return ShortcutIndexByAppUserModelId[AppUserModelId]
+	; Read the index once. A rebuild replaces the whole Map, and now that rebuilds happen
+	; on a timer thread rather than this one, `Has` and `[...]` against the global could
+	; otherwise land on either side of the swap.
+	Index := ShortcutIndexByAppUserModelId
+	if Index.Has(AppUserModelId) {
+		return Index[AppUserModelId]
 	}
-	; A shortcut may have appeared since the index was built, e.g. by installing a new
-	; PWA. Rebuild for that case, but rate limited, since scanning isn't cheap.
+	; A shortcut may have appeared since the index was built, e.g. by installing a new PWA.
+	; Rebuild for that case, rate limited, since scanning isn't cheap -- and *off* this
+	; thread, because "isn't cheap" means about a second, and this runs on the interactive
+	; Alt+Tab path with the panel not yet on screen. An AUMID that matches no shortcut is
+	; the ordinary case for packaged apps, so before this the first Alt+Tab after any five
+	; minute lull paid for a full rescan.
+	;
+	; The cost of deferring is that a newly installed app is named on the *next* Alt+Tab
+	; rather than this one, which is a better trade than a one second stall every time.
 	; (The A_TickCount comparison also handles its ~49 day wraparound.)
 	Age := A_TickCount - ShortcutIndexBuildTickCount
 	if (Age > RescanIntervalMs || Age < 0) {
-		BuildAppShortcutIndex()
-		if ShortcutIndexByAppUserModelId.Has(AppUserModelId) {
-			return ShortcutIndexByAppUserModelId[AppUserModelId]
-		}
+		; Claim the interval up front, so a switcher listing several unrecognized AUMIDs
+		; schedules one rescan rather than one per app. `BuildAppShortcutIndex` sets it
+		; again when it finishes.
+		;
+		; A negative period is only "after 1 ms" -- what keeps the scan off this thread is
+		; the `Thread "NoTimers"` in app-switcher.ahk's Alt+Tab handler, which holds every
+		; timer back until the keypress is over. Without that, this fires mid-loop and the
+		; stall is merely relocated.
+		ShortcutIndexBuildTickCount := A_TickCount
+		SetTimer(BuildAppShortcutIndex, -1)
 	}
 	return 0
 }
@@ -432,7 +424,7 @@ BuildAppShortcutIndex() {
 			continue
 		}
 		Loop Files Folder "\*.lnk", "FR" {
-			AppUserModelId := GetFileShellProperty(A_LoopFileFullPath, PKEY_AppUserModel_FMTID, PID_AppUserModel_ID)
+			AppUserModelId := GetFirstFileShellProperty(A_LoopFileFullPath, PKEY_AppUserModel_FMTID, PID_AppUserModel_ID)
 			if (AppUserModelId = "" || Index.Has(AppUserModelId)) {
 				; First shortcut found for an AUMID wins; the search folders are ordered
 				; most-specific-first so that a pinned shortcut beats a Start Menu one.
@@ -866,23 +858,30 @@ GenericAppIconHandle() {
 
 ; Returns the icon a window advertises for itself, or 0. This handle belongs to the
 ; other application, so it must not be destroyed.
+;
+; The explicit 200 ms timeouts matter because this runs on the interactive Alt+Tab path,
+; before the panel is on screen, once per application, and is not cached -- unlike display
+; names, which memoize in LogicalAppNameCache. `SendMessage`'s default is 5000 ms, so three
+; slow-to-pump windows could hold the keypress for fifteen seconds. (Whether a *hung* window
+; short-circuits sooner is an undocumented implementation detail of AutoHotkey's, so the
+; worst case is worth bounding rather than relying on.) A window that doesn't answer in
+; 200 ms yields no icon, which the caller already handles: it falls through to the
+; executable's icon and then to the stock application icon.
 GetWindowIconHandle(Window) {
 	IconHandle := 0
+	try {
+		IconHandle := SendMessage(WM_GETICON, ICON_BIG, 0, , Window, , , , 200)
+	} catch {
+	}
 	if (!IconHandle) {
 		try {
-			IconHandle := SendMessage(WM_GETICON, ICON_BIG, 0, , Window)
+			IconHandle := SendMessage(WM_GETICON, ICON_SMALL2, 0, , Window, , , , 200)
 		} catch {
 		}
 	}
 	if (!IconHandle) {
 		try {
-			IconHandle := SendMessage(WM_GETICON, ICON_SMALL2, 0, , Window)
-		} catch {
-		}
-	}
-	if (!IconHandle) {
-		try {
-			IconHandle := SendMessage(WM_GETICON, ICON_SMALL, 0, , Window)
+			IconHandle := SendMessage(WM_GETICON, ICON_SMALL, 0, , Window, , , , 200)
 		} catch {
 		}
 	}
@@ -1185,10 +1184,17 @@ MakeSplash(Title, Text, Duration := 0) {
 	return SplashGui
 }
 
+; Only ever used to describe a window in an error message, so it must not be able to raise an
+; error of its own -- it is called from `RestoreHiddenWindows`, on the path that puts windows
+; back in the taskbar. `TargetError` alone wasn't enough: `WinGetProcessPath` throws `OSError`
+; for a process we aren't allowed to query, which is precisely the elevated-window case that
+; gets us into that error handler in the first place.
 DescribeWindow(Window) {
 	try {
 		return "Window Title: " WinGetTitle(Window) "`nWindow Class: " WinGetClass(Window) "`nProcess Path: " WinGetProcessPath(Window) "`nLogical App: " GetLogicalAppId(Window)
 	} catch TargetError {
 		return "Nonexistent window"
+	} catch {
+		return "Window " Window " (couldn't be described)"
 	}
 }

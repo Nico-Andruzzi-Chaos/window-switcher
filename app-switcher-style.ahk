@@ -1,5 +1,10 @@
 #Requires AutoHotkey v2.0
 
+; `SetDarkMenu` below resolves uxtheme with `GetModuleHandle`, which only finds a library
+; that is already loaded. This is what guarantees it is -- the guarantee used to come from
+; GuiEnhancerKit.ahk, which carried the same directive.
+#DllLoad uxtheme.dll
+
 ;--------------------------------------------------------
 ; App Switcher styling
 ;--------------------------------------------------------
@@ -266,12 +271,69 @@ AppSwitcherPanelLayout(ItemCount, AvailableWidth, AvailableHeight) {
 ; Where an item's box goes, given its one-based position and the width of the grid. The box
 ; is the icon-and-label area; the highlight is drawn `SelectionExtent` outside it. Items are
 ; placed row-major, which is the order the controls are added in, and hence the Tab order.
-AppSwitcherItemPosition(Index, Columns) {
+;
+; `ItemsShown` is what lets the last row be centred the way Windows centres its own, rather
+; than sitting hard against the left padding: with twelve apps in a ten-wide grid, the two
+; on the second row are placed in the middle. Passing 0 (or leaving it out) switches that
+; off. Every *full* row comes out with an offset of zero either way, so a single-row panel --
+; overwhelmingly the common case -- is positioned exactly as it was before.
+AppSwitcherItemPosition(Index, Columns, ItemsShown := 0) {
 	Step := AppSwitcherStyle.ItemSize + AppSwitcherStyle.ItemGap
-	return {
-		X: AppSwitcherStyle.PanelPadding + Mod(Index - 1, Columns) * Step,
-		Y: AppSwitcherStyle.PanelPadding + ((Index - 1) // Columns) * Step
+	Row := (Index - 1) // Columns
+	Column := Mod(Index - 1, Columns)
+	ItemsInRow := Columns
+	if (ItemsShown > 0) {
+		Remaining := ItemsShown - Row * Columns
+		if (Remaining < Columns) {
+			ItemsInRow := Remaining
+		}
 	}
+	return {
+		X: AppSwitcherStyle.PanelPadding + (Columns - ItemsInRow) * Step // 2 + Column * Step,
+		Y: AppSwitcherStyle.PanelPadding + Row * Step
+	}
+}
+
+;--------------------------------------------------------
+; Window attributes and dark mode
+;--------------------------------------------------------
+; These three were `SetWindowAttribute`, `SetDarkTitle` and `SetDarkMenu` from
+; GuiEnhancerKit, which were all that was still using it once `SetBorderless` went (see the
+; note above `ApplyAppSwitcherFrame`). Reproduced exactly, down to the version gate and the
+; undocumented uxtheme ordinals, so that dropping 870 lines of unused library changes nothing
+; about how the panel looks.
+
+; Every DWM attribute set here is a 4-byte BOOL or enum. `uint*` passes the value by address,
+; which is what DwmSetWindowAttribute takes.
+SetDwmWindowAttribute(Hwnd, Attribute, Value) =>
+	DllCall("dwmapi\DwmSetWindowAttribute", "ptr", Hwnd, "uint", Attribute, "uint*", Value, "int", 4)
+
+; DWMWA_USE_IMMERSIVE_DARK_MODE, which was attribute 19 until Windows 10 build 18985 and 20
+; from there on, and doesn't exist at all before 17763.
+SetDarkTitle(PanelGui) {
+	Attribute := (VerCompare(A_OSVersion, "10.0.18985") >= 0) ? 20
+		: (VerCompare(A_OSVersion, "10.0.17763") >= 0) ? 19
+		: 0
+	if Attribute {
+		SetDwmWindowAttribute(PanelGui.Hwnd, Attribute, true)
+	}
+}
+
+; Dark context menus for this process, through two uxtheme exports that have no names --
+; ordinal 135 is SetPreferredAppMode (1 = AllowDark) and 136 is FlushMenuThemes. Being
+; undocumented, every step is checked rather than assumed; the worst case is light menus.
+SetDarkMenu() {
+	Uxtheme := DllCall("GetModuleHandleW", "wstr", "uxtheme", "ptr")
+	if !Uxtheme {
+		return
+	}
+	SetPreferredAppMode := DllCall("GetProcAddress", "ptr", Uxtheme, "ptr", 135, "ptr")
+	FlushMenuThemes := DllCall("GetProcAddress", "ptr", Uxtheme, "ptr", 136, "ptr")
+	if (!SetPreferredAppMode || !FlushMenuThemes) {
+		return
+	}
+	DllCall(SetPreferredAppMode, "int", 1)
+	DllCall(FlushMenuThemes)
 }
 
 ;--------------------------------------------------------
@@ -311,11 +373,11 @@ DWMWCP_ROUND := 2
 ApplyAppSwitcherFrame(PanelGui, Inset := "") {
 	; No open/close animation on a panel that appears and disappears with a keypress. (This is
 	; what `SetBorderless` set, and it's kept for behavioural parity with it.)
-	PanelGui.SetWindowAttribute(DWMWA_TRANSITIONS_FORCEDISABLED, true)
+	SetDwmWindowAttribute(PanelGui.Hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, true)
 	; Rounded corners, and the translucent 1px outer border along with them. DWMWCP_ROUND's
 	; radius is 8 epx, which is the radius the real Alt+Tab panel has.
 	if (VerCompare(A_OSVersion, "10.0.22000") >= 0) {
-		PanelGui.SetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+		SetDwmWindowAttribute(PanelGui.Hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
 	}
 	Rect := Buffer(16, 0)
 	DllCall("GetWindowRect", "ptr", PanelGui.Hwnd, "ptr", Rect)
