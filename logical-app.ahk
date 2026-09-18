@@ -43,17 +43,8 @@ ICON_BIG := 1
 ICON_SMALL := 0
 ICON_SMALL2 := 2
 
-GCW_ATOM := -32 ; Retrieves an ATOM value that uniquely identifies the window class. This is the same atom that the RegisterClassEx function returns.
-GCL_CBCLSEXTRA := -20 ; Retrieves the size, in bytes, of the extra memory associated with the class.
-GCL_CBWNDEXTRA := -18 ; Retrieves the size, in bytes, of the extra window memory associated with each window in the class. For information on how to access this memory, see GetWindowLongPtr.
-GCLP_HBRBACKGROUND := -10 ; Retrieves a handle to the background brush associated with the class.
-GCLP_HCURSOR := -12 ; Retrieves a handle to the cursor associated with the class.
 GCLP_HICON := -14 ; Retrieves a handle to the icon associated with the class.
 GCLP_HICONSM := -34 ; Retrieves a handle to the small icon associated with the class.
-GCLP_HMODULE := -16 ; Retrieves a handle to the module that registered the class.
-GCLP_MENUNAME := -8 ; Retrieves the pointer to the menu name string. The string identifies the menu resource associated with the class.
-GCL_STYLE := -26 ; Retrieves the window-class style bits.
-GCLP_WNDPROC := -24 ; Retrieves the address of the window procedure, or a handle representing the address of the window procedure. You must use the CallWindowProc function to call the window procedure.
 
 WS_CHILD := 0x40000000
 ; WS_THICKFRAME := 0x00040000
@@ -79,7 +70,6 @@ PID_FileDescription := 3 ; System.FileDescription
 PID_ProductName := 7 ; System.Software.ProductName
 
 ; VARENUM members that a string-valued PROPVARIANT can use.
-VT_EMPTY := 0
 VT_BSTR := 8
 VT_LPWSTR := 31
 
@@ -275,28 +265,10 @@ GetWindowShellProperty(Window, FormatId, PropertyId) {
 	return ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId)
 }
 
-; Same, for a file (used to read the AUMID that Start Menu shortcuts advertise).
-GetFileShellProperty(Path, FormatId, PropertyId) {
-	if (Path = "") {
-		return ""
-	}
-	InterfaceId := Buffer(16, 0)
-	if (DllCall("ole32\CLSIDFromString", "wstr", IID_IPropertyStore, "ptr", InterfaceId, "int") != 0) {
-		return ""
-	}
-	PropertyStore := 0
-	try {
-		HResult := DllCall("shell32\SHGetPropertyStoreFromParsingName", "wstr", Path, "ptr", 0, "uint", GPS_DEFAULT, "ptr", InterfaceId, "ptr*", &PropertyStore, "int")
-	} catch {
-		return ""
-	}
-	if (HResult != 0 || !PropertyStore) {
-		return ""
-	}
-	return ReadStringPropertyAndRelease(PropertyStore, FormatId, PropertyId)
-}
-
-; Reads several properties from one property store, returning the first non-empty value.
+; Same, for a file: reads properties from one property store, returning the first non-empty
+; value. Used to read the AUMID that Start Menu shortcuts advertise, and an executable's
+; version info.
+;
 ; Binding the store is the expensive part -- measured at 6+ ms per bind on a local
 ; executable -- and this runs on the interactive Alt+Tab path, once per application without
 ; an AUMID. So properties that are alternatives to one another are read in a single call
@@ -432,7 +404,7 @@ BuildAppShortcutIndex() {
 			continue
 		}
 		Loop Files Folder "\*.lnk", "FR" {
-			AppUserModelId := GetFileShellProperty(A_LoopFileFullPath, PKEY_AppUserModel_FMTID, PID_AppUserModel_ID)
+			AppUserModelId := GetFirstFileShellProperty(A_LoopFileFullPath, PKEY_AppUserModel_FMTID, PID_AppUserModel_ID)
 			if (AppUserModelId = "" || Index.Has(AppUserModelId)) {
 				; First shortcut found for an AUMID wins; the search folders are ordered
 				; most-specific-first so that a pinned shortcut beats a Start Menu one.
@@ -868,11 +840,9 @@ GenericAppIconHandle() {
 ; other application, so it must not be destroyed.
 GetWindowIconHandle(Window) {
 	IconHandle := 0
-	if (!IconHandle) {
-		try {
-			IconHandle := SendMessage(WM_GETICON, ICON_BIG, 0, , Window)
-		} catch {
-		}
+	try {
+		IconHandle := SendMessage(WM_GETICON, ICON_BIG, 0, , Window)
+	} catch {
 	}
 	if (!IconHandle) {
 		try {

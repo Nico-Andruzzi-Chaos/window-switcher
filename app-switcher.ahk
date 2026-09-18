@@ -43,11 +43,7 @@ SS_NOPREFIX := 0x00000080
 DWMWA_USE_HOSTBACKDROPBRUSH := 17
 DWMWA_SYSTEMBACKDROP_TYPE := 38
 ; https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type
-DWMSBT_AUTO := 0
-DWMSBT_NONE := 1
-DWMSBT_MAINWINDOW := 2
 DWMSBT_TRANSIENTWINDOW := 3
-DWMSBT_TABBEDWINDOW := 4
 
 ;--------------------------------------------------------
 ; Tray Menu
