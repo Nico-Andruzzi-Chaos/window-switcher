@@ -129,7 +129,7 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 			; left out are the least recently used.
 			break
 		}
-		Item := AppSwitcherItemPosition(index, Layout.Columns)
+		Item := AppSwitcherItemPosition(index, Layout.Columns, Layout.ItemsShown)
 		; The highlight sits behind the icon and the label, and is the control whose image gets
 		; swapped as the selection moves. It reaches `Extent` outside the item box on every side,
 		; the way Windows' ring reaches outside its cards.

@@ -271,11 +271,26 @@ AppSwitcherPanelLayout(ItemCount, AvailableWidth, AvailableHeight) {
 ; Where an item's box goes, given its one-based position and the width of the grid. The box
 ; is the icon-and-label area; the highlight is drawn `SelectionExtent` outside it. Items are
 ; placed row-major, which is the order the controls are added in, and hence the Tab order.
-AppSwitcherItemPosition(Index, Columns) {
+;
+; `ItemsShown` is what lets the last row be centred the way Windows centres its own, rather
+; than sitting hard against the left padding: with twelve apps in a ten-wide grid, the two
+; on the second row are placed in the middle. Passing 0 (or leaving it out) switches that
+; off. Every *full* row comes out with an offset of zero either way, so a single-row panel --
+; overwhelmingly the common case -- is positioned exactly as it was before.
+AppSwitcherItemPosition(Index, Columns, ItemsShown := 0) {
 	Step := AppSwitcherStyle.ItemSize + AppSwitcherStyle.ItemGap
+	Row := (Index - 1) // Columns
+	Column := Mod(Index - 1, Columns)
+	ItemsInRow := Columns
+	if (ItemsShown > 0) {
+		Remaining := ItemsShown - Row * Columns
+		if (Remaining < Columns) {
+			ItemsInRow := Remaining
+		}
+	}
 	return {
-		X: AppSwitcherStyle.PanelPadding + Mod(Index - 1, Columns) * Step,
-		Y: AppSwitcherStyle.PanelPadding + ((Index - 1) // Columns) * Step
+		X: AppSwitcherStyle.PanelPadding + (Columns - ItemsInRow) * Step // 2 + Column * Step,
+		Y: AppSwitcherStyle.PanelPadding + Row * Step
 	}
 }
 
