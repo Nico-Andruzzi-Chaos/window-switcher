@@ -376,21 +376,36 @@ FindShortcutForAppUserModelId(AppUserModelId) {
 	if (AppUserModelId = "") {
 		return 0
 	}
+	global ShortcutIndexBuildTickCount
 	if !ShortcutIndexByAppUserModelId {
+		; Cold start only, and `PrimeAppShortcutIndex` normally gets here first. Paid
+		; inline because the alternative is a first switcher with no PWA names in it.
 		BuildAppShortcutIndex()
 	}
-	if ShortcutIndexByAppUserModelId.Has(AppUserModelId) {
-		return ShortcutIndexByAppUserModelId[AppUserModelId]
+	; Read the index once. A rebuild replaces the whole Map, and now that rebuilds happen
+	; on a timer thread rather than this one, `Has` and `[...]` against the global could
+	; otherwise land on either side of the swap.
+	Index := ShortcutIndexByAppUserModelId
+	if Index.Has(AppUserModelId) {
+		return Index[AppUserModelId]
 	}
-	; A shortcut may have appeared since the index was built, e.g. by installing a new
-	; PWA. Rebuild for that case, but rate limited, since scanning isn't cheap.
+	; A shortcut may have appeared since the index was built, e.g. by installing a new PWA.
+	; Rebuild for that case, rate limited, since scanning isn't cheap -- and *off* this
+	; thread, because "isn't cheap" means about a second, and this runs on the interactive
+	; Alt+Tab path with the panel not yet on screen. An AUMID that matches no shortcut is
+	; the ordinary case for packaged apps, so before this the first Alt+Tab after any five
+	; minute lull paid for a full rescan.
+	;
+	; The cost of deferring is that a newly installed app is named on the *next* Alt+Tab
+	; rather than this one, which is a better trade than a one second stall every time.
 	; (The A_TickCount comparison also handles its ~49 day wraparound.)
 	Age := A_TickCount - ShortcutIndexBuildTickCount
 	if (Age > RescanIntervalMs || Age < 0) {
-		BuildAppShortcutIndex()
-		if ShortcutIndexByAppUserModelId.Has(AppUserModelId) {
-			return ShortcutIndexByAppUserModelId[AppUserModelId]
-		}
+		; Claim the interval up front, so a switcher listing several unrecognized AUMIDs
+		; schedules one rescan rather than one per app. `BuildAppShortcutIndex` sets it
+		; again when it finishes.
+		ShortcutIndexBuildTickCount := A_TickCount
+		SetTimer(BuildAppShortcutIndex, -1)
 	}
 	return 0
 }
@@ -838,21 +853,30 @@ GenericAppIconHandle() {
 
 ; Returns the icon a window advertises for itself, or 0. This handle belongs to the
 ; other application, so it must not be destroyed.
+;
+; The explicit 200 ms timeouts matter because this runs on the interactive Alt+Tab path,
+; before the panel is on screen, once per application, and is not cached -- unlike display
+; names, which memoize in LogicalAppNameCache. `SendMessage`'s default is 5000 ms, so three
+; slow-to-pump windows could hold the keypress for fifteen seconds. (Whether a *hung* window
+; short-circuits sooner is an undocumented implementation detail of AutoHotkey's, so the
+; worst case is worth bounding rather than relying on.) A window that doesn't answer in
+; 200 ms yields no icon, which the caller already handles: it falls through to the
+; executable's icon and then to the stock application icon.
 GetWindowIconHandle(Window) {
 	IconHandle := 0
 	try {
-		IconHandle := SendMessage(WM_GETICON, ICON_BIG, 0, , Window)
+		IconHandle := SendMessage(WM_GETICON, ICON_BIG, 0, , Window, , , , 200)
 	} catch {
 	}
 	if (!IconHandle) {
 		try {
-			IconHandle := SendMessage(WM_GETICON, ICON_SMALL2, 0, , Window)
+			IconHandle := SendMessage(WM_GETICON, ICON_SMALL2, 0, , Window, , , , 200)
 		} catch {
 		}
 	}
 	if (!IconHandle) {
 		try {
-			IconHandle := SendMessage(WM_GETICON, ICON_SMALL, 0, , Window)
+			IconHandle := SendMessage(WM_GETICON, ICON_SMALL, 0, , Window, , , , 200)
 		} catch {
 		}
 	}
