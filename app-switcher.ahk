@@ -3,7 +3,6 @@
 ; twice or the launcher is run again. Replace the old instance instead.
 #SingleInstance Force
 
-#Include "./GuiEnhancerKit.ahk"
 #Include "./logical-app.ahk"
 #Include "./app-switcher-style.ahk"
 
@@ -97,13 +96,13 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	Layout := AppSwitcherPanelLayout(Apps.Length
 		, ScaleToGuiUnits(WorkArea.Width), ScaleToGuiUnits(WorkArea.Height))
 
-	global AppSwitcher := GuiExt()
+	global AppSwitcher := Gui()
 
 	AppSwitcher.SetFont(Format("c{:06X} s{:d}", LabelTextColor(Dark), AppSwitcherStyle.LabelFontSize), "Segoe UI")
 	if Dark {
-		AppSwitcher.SetDarkTitle()  ; needed for dark window background apparently, even though there's no title bar
+		SetDarkTitle(AppSwitcher)  ; needed for dark window background apparently, even though there's no title bar
 	}
-	AppSwitcher.SetDarkMenu()  ; should be unnecessary
+	SetDarkMenu()  ; should be unnecessary
 
 	; Windows draws this panel as acrylic when "Transparency effects" is on and as a flat surface
 	; colour when it's off -- which is why the reference screenshots show a byte-identical #202020
@@ -190,8 +189,8 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 		; Set blur-behind accent effect, matching what the real switcher does when transparency
 		; effects are enabled. (Supported starting with Windows 11 Build 22000.)
 		; Doesn't seem to work the first time. See workaround below.
-		AppSwitcher.SetWindowAttribute(DWMWA_USE_HOSTBACKDROPBRUSH, true)  ; required for DWMSBT_TRANSIENTWINDOW
-		AppSwitcher.SetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
+		SetDwmWindowAttribute(AppSwitcher.Hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, true)  ; required for DWMSBT_TRANSIENTWINDOW
+		SetDwmWindowAttribute(AppSwitcher.Hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)
 	} else {
 		ApplyAppSwitcherFrame(AppSwitcher, 1)
 	}

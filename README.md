@@ -56,7 +56,7 @@ If you only want one of them, the files each needs are:
 | Utility | Files |
 | --- | --- |
 | Window Switcher | `window-switcher.ahk`, `logical-app.ahk` |
-| Application Switcher | `app-switcher.ahk`, `app-switcher-style.ahk`, `logical-app.ahk`, `GuiEnhancerKit.ahk` |
+| Application Switcher | `app-switcher.ahk`, `app-switcher-style.ahk`, `logical-app.ahk` |
 
 `logical-app.ahk` is shared by both, and must sit in the same directory as the script that
 includes it. (Include paths are resolved relative to the script's own folder, so the
@@ -68,7 +68,7 @@ You can run either script directly instead of using `start-both-window-and-app-s
 
 - To run at startup with administrator privileges:
   - Place the scripts somewhere permanent, since moving or renaming them will break the startup action.
-    - Keep the whole extracted folder together: `logical-app.ahk` must stay next to the switcher scripts, and the app switcher also needs `app-switcher-style.ahk` and `GuiEnhancerKit.ahk`.
+    - Keep the whole extracted folder together: `logical-app.ahk` must stay next to the switcher scripts, and the app switcher also needs `app-switcher-style.ahk`.
   - Open Task Scheduler
   - Action > Create Task...
   - Check "Run with highest privileges" in "Security options" in General tab
@@ -120,8 +120,9 @@ publishing the same AUMID → the window's own icon → the executable's icon.
 
 The executable's version info is preferred over the window title because window titles name the
 *document*, not the application. The shortcut index is built once in the background shortly after
-the app switcher starts (scanning the Start Menu takes about a second), and is refreshed at most
-every five minutes when an unrecognized AUMID shows up, so newly installed apps get picked up.
+the app switcher starts (scanning the Start Menu takes about a second). When an unrecognized AUMID
+shows up it schedules a rescan — in the background, and at most once every five minutes — so newly
+installed apps get picked up on the next <kbd>Alt+Tab</kbd> rather than stalling the current one.
 
 ### Multiple browser profiles
 

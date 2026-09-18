@@ -1,5 +1,10 @@
 #Requires AutoHotkey v2.0
 
+; `SetDarkMenu` below resolves uxtheme with `GetModuleHandle`, which only finds a library
+; that is already loaded. This is what guarantees it is -- the guarantee used to come from
+; GuiEnhancerKit.ahk, which carried the same directive.
+#DllLoad uxtheme.dll
+
 ;--------------------------------------------------------
 ; App Switcher styling
 ;--------------------------------------------------------
@@ -275,6 +280,48 @@ AppSwitcherItemPosition(Index, Columns) {
 }
 
 ;--------------------------------------------------------
+; Window attributes and dark mode
+;--------------------------------------------------------
+; These three were `SetWindowAttribute`, `SetDarkTitle` and `SetDarkMenu` from
+; GuiEnhancerKit, which were all that was still using it once `SetBorderless` went (see the
+; note above `ApplyAppSwitcherFrame`). Reproduced exactly, down to the version gate and the
+; undocumented uxtheme ordinals, so that dropping 870 lines of unused library changes nothing
+; about how the panel looks.
+
+; Every DWM attribute set here is a 4-byte BOOL or enum. `uint*` passes the value by address,
+; which is what DwmSetWindowAttribute takes.
+SetDwmWindowAttribute(Hwnd, Attribute, Value) =>
+	DllCall("dwmapi\DwmSetWindowAttribute", "ptr", Hwnd, "uint", Attribute, "uint*", Value, "int", 4)
+
+; DWMWA_USE_IMMERSIVE_DARK_MODE, which was attribute 19 until Windows 10 build 18985 and 20
+; from there on, and doesn't exist at all before 17763.
+SetDarkTitle(PanelGui) {
+	Attribute := (VerCompare(A_OSVersion, "10.0.18985") >= 0) ? 20
+		: (VerCompare(A_OSVersion, "10.0.17763") >= 0) ? 19
+		: 0
+	if Attribute {
+		SetDwmWindowAttribute(PanelGui.Hwnd, Attribute, true)
+	}
+}
+
+; Dark context menus for this process, through two uxtheme exports that have no names --
+; ordinal 135 is SetPreferredAppMode (1 = AllowDark) and 136 is FlushMenuThemes. Being
+; undocumented, every step is checked rather than assumed; the worst case is light menus.
+SetDarkMenu() {
+	Uxtheme := DllCall("GetModuleHandleW", "wstr", "uxtheme", "ptr")
+	if !Uxtheme {
+		return
+	}
+	SetPreferredAppMode := DllCall("GetProcAddress", "ptr", Uxtheme, "ptr", 135, "ptr")
+	FlushMenuThemes := DllCall("GetProcAddress", "ptr", Uxtheme, "ptr", 136, "ptr")
+	if (!SetPreferredAppMode || !FlushMenuThemes) {
+		return
+	}
+	DllCall(SetPreferredAppMode, "int", 1)
+	DllCall(FlushMenuThemes)
+}
+
+;--------------------------------------------------------
 ; The panel's frame
 ;--------------------------------------------------------
 ; The rounded corners and the translucent 1px outer border are both DWM's work, not ours.
@@ -311,11 +358,11 @@ DWMWCP_ROUND := 2
 ApplyAppSwitcherFrame(PanelGui, Inset := "") {
 	; No open/close animation on a panel that appears and disappears with a keypress. (This is
 	; what `SetBorderless` set, and it's kept for behavioural parity with it.)
-	PanelGui.SetWindowAttribute(DWMWA_TRANSITIONS_FORCEDISABLED, true)
+	SetDwmWindowAttribute(PanelGui.Hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, true)
 	; Rounded corners, and the translucent 1px outer border along with them. DWMWCP_ROUND's
 	; radius is 8 epx, which is the radius the real Alt+Tab panel has.
 	if (VerCompare(A_OSVersion, "10.0.22000") >= 0) {
-		PanelGui.SetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+		SetDwmWindowAttribute(PanelGui.Hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
 	}
 	Rect := Buffer(16, 0)
 	DllCall("GetWindowRect", "ptr", PanelGui.Hwnd, "ptr", Rect)
