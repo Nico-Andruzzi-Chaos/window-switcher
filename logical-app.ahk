@@ -440,7 +440,7 @@ BuildAppShortcutIndex() {
 			}
 			SplitPath(A_LoopFileFullPath, , , , &NameWithoutExtension)
 			Index[AppUserModelId] := {
-				Name: NormalizeShortcutName(NameWithoutExtension),
+				Name: NormalizeAppDisplayName(NameWithoutExtension),
 				Path: A_LoopFileFullPath,
 			}
 		}
@@ -464,10 +464,11 @@ AppShortcutSearchFolders() {
 	]
 }
 
-; Windows uniquifies shortcut filenames by appending " (1)", " (2)" and so on when two
-; shortcuts would otherwise collide, so a PWA's shortcut can be called
-; "Google Chat (1).lnk". Drop that suffix so the switcher shows "Google Chat".
-NormalizeShortcutName(Name) {
+; Windows uniquifies names by appending " (1)", " (2)" and so on when two would otherwise
+; collide, and it does this in both places an app's name can come from: a PWA's shortcut can
+; be called "Google Chat (1).lnk", and the same app's AppsFolder entry is likewise named
+; "Google Chat (1)" (measured). Drop that suffix so the switcher shows "Google Chat".
+NormalizeAppDisplayName(Name) {
 	if RegExMatch(Name, "^(.*\S)\s+\(\d+\)$", &Match) {
 		return Match[1]
 	}
@@ -505,7 +506,7 @@ GetAppsFolderDisplayName(AppUserModelId) {
 		try {
 			StringPointer := 0
 			if (ComCall(IShellItem_GetDisplayName, ShellItem, "uint", SIGDN_NORMALDISPLAY, "ptr*", &StringPointer, "int") = 0 && StringPointer) {
-				Name := StrGet(StringPointer, "UTF-16")
+				Name := NormalizeAppDisplayName(StrGet(StringPointer, "UTF-16"))
 				DllCall("ole32\CoTaskMemFree", "ptr", StringPointer)
 			}
 		} catch {

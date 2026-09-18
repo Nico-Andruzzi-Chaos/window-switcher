@@ -16,8 +16,8 @@ Each utility is lightning fast, compliments each other, and integrates smoothly 
 - <kbd>Alt+`</kbd> to switch between windows of the same application
 - <kbd>Shift</kbd> to cycle in reverse
 - <kbd>Escape</kbd> to cancel
-- Hides only what it should: Task Manager and other elevated windows when running as
-  administrator, and UWP windows through the shell's own application-view flag
+- Filters reliably, including the windows Windows makes awkward: UWP apps such as Settings
+  and the Microsoft Store, and — when running as administrator — elevated ones such as Task Manager
 - Matches windows by *logical application*, not by process
   - The windows of an installed PWA stay separate from the browser's own windows, even though they share `chrome.exe`. See [Logical applications](#logical-applications).
 - ✨ Uses the native Windows window switching UI ✨
@@ -34,6 +34,7 @@ Each utility is lightning fast, compliments each other, and integrates smoothly 
 - <kbd>Escape</kbd> to cancel
 - One entry per application, not one per window
   - Ten browser windows are a single entry, while each installed PWA is its own entry, with its own name and icon. See [Logical applications](#logical-applications).
+  - Packaged apps such as Settings, the Microsoft Store and Calculator appear too, named and illustrated from the Start Menu's app list, since they offer no icon of their own.
 - Custom UI, designed to match the native Windows 11 <kbd>Alt+Tab</kbd> switcher
   - Follows the system light/dark setting, accent colour, transparency-effects setting and display scaling
   - Opens on the monitor holding the active window, wrapping into a grid to fit its work area
@@ -163,13 +164,6 @@ Two mechanisms handle it:
   - ❌ I don't know of any way to hide windows from the task switcher without hiding them from the taskbar.
 - Some windows are not hidden from the task switcher, such as the Task Manager, due to permission errors.
   - 🛡️✅ Running as administrator fixes this.
-- ✅ UWP windows (Settings, the Microsoft Store) used to leak into the filtered switcher no
-  matter what, because `ITaskbarList::DeleteTab` returns `S_OK` for them and does nothing.
-  The reason is that Windows 11 doesn't build its Alt+Tab list by enumerating windows at all
-  — it iterates the shell's *application views*, which never consult the window. So every
-  window-level method is a dead end, which is why `WinHide`, `WinSetExStyle` and `DeleteTab`
-  all failed. They're now hidden through the view instead, with the same flag the shell uses
-  itself; see the notes in `logical-app.ahk`.
 
 ### Both
 
@@ -191,13 +185,6 @@ Two mechanisms handle it:
 ### Application Switcher
 
 - 🎨 The blur-behind effect doesn't always work. (Usually it works when triggering the app switcher a second time.)
-- 🙈 UWP apps (Settings, Microsoft Store, Calculator and the rest) used to be missing from the app
-  switcher entirely. Every source of an icon comes up empty for them: they publish no icon of their
-  own, they have no Start Menu shortcut to borrow one from, and the executable behind their window is
-  `ApplicationFrameHost.exe`, which contains no icons at all -- so they were dropped from the panel,
-  silently. They're now looked up by AUMID in `shell:AppsFolder`, the virtual folder behind the Start
-  Menu's app list, which is the one place a packaged app's real name and icon exist. (It also stopped
-  them being labelled "Application Frame Host" on the way.) See [Logical applications](#logical-applications).
 - More apps than fit on screen are dropped rather than scrolled. The panel wraps into a grid
   sized to the monitor's work area, and if even a full grid can't hold every app, the least
   recently used ones are left out. Windows scrolls its switcher instead.
