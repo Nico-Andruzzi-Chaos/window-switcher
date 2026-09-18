@@ -404,6 +404,11 @@ FindShortcutForAppUserModelId(AppUserModelId) {
 		; Claim the interval up front, so a switcher listing several unrecognized AUMIDs
 		; schedules one rescan rather than one per app. `BuildAppShortcutIndex` sets it
 		; again when it finishes.
+		;
+		; A negative period is only "after 1 ms" -- what keeps the scan off this thread is
+		; the `Thread "NoTimers"` in app-switcher.ahk's Alt+Tab handler, which holds every
+		; timer back until the keypress is over. Without that, this fires mid-loop and the
+		; stall is merely relocated.
 		ShortcutIndexBuildTickCount := A_TickCount
 		SetTimer(BuildAppShortcutIndex, -1)
 	}

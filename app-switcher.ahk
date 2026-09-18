@@ -325,6 +325,18 @@ UpdateFocusHighlight() {
 $!Tab::
 $!+Tab:: {
 	global AppSwitcher
+	; Nothing on this thread can afford a timer landing in the middle of it, and one is aimed
+	; squarely at it: `FindShortcutForAppUserModelId` hands its Start Menu rescan to
+	; `SetTimer(..., -1)` to keep that ~1 s scan off the thread that has to put the panel up.
+	; But a negative period only means "after 1 ms", and a thread becomes interruptible once
+	; it has run 15 ms -- which this one has, long before the app-building loop that schedules
+	; the rescan reaches its end. Without this the scan simply ran at an arbitrary point
+	; mid-loop rather than at the call site: the same stall, only harder to find.
+	;
+	; Blocking timers for the length of the keypress is what actually defers it. The rebuild
+	; runs the moment this thread ends, with the panel long since shown and the switch already
+	; committed -- a few seconds' delay to a five minute rescan.
+	Thread "NoTimers", true
 	if IsNativeSwitcherSessionActive() {
 		; The same-app window switcher currently has the native task switcher open.
 		; Pass Tab through so that it cycles through that, instead of opening this
