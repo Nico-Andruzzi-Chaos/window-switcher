@@ -1179,10 +1179,17 @@ MakeSplash(Title, Text, Duration := 0) {
 	return SplashGui
 }
 
+; Only ever used to describe a window in an error message, so it must not be able to raise an
+; error of its own -- it is called from `RestoreHiddenWindows`, on the path that puts windows
+; back in the taskbar. `TargetError` alone wasn't enough: `WinGetProcessPath` throws `OSError`
+; for a process we aren't allowed to query, which is precisely the elevated-window case that
+; gets us into that error handler in the first place.
 DescribeWindow(Window) {
 	try {
 		return "Window Title: " WinGetTitle(Window) "`nWindow Class: " WinGetClass(Window) "`nProcess Path: " WinGetProcessPath(Window) "`nLogical App: " GetLogicalAppId(Window)
 	} catch TargetError {
 		return "Nonexistent window"
+	} catch {
+		return "Window " Window " (couldn't be described)"
 	}
 }

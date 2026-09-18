@@ -76,6 +76,9 @@ ShowAppSwitcher(Apps, AnchorWindow := 0, Warmup := false) {
 	; Otherwise stale entries pile up for the lifetime of the script -- one per app per
 	; session -- each holding a control belonging to a Gui that no longer exists.
 	FocusRingByHWND.Clear()
+	; Cleared alongside the map it indexes into: it points at a control of the Gui that
+	; `CloseAppSwitcher` above just destroyed.
+	global LastFocusHighlight := 0
 
 	; Everything below comes out of app-switcher-style.ahk, which holds the presentation values
 	; measured off the real Windows 11 Alt+Tab switcher, and the highlight images drawn from them.
@@ -222,23 +225,36 @@ CancelAppSwitcher(*) {
 ; This is the only path that activates an application.
 ConfirmAppSwitcher() {
 	global AppSwitcher, AppSwitcherCancelled
+	; Read the global once: the Escape hotkey can zero it between the check below and the
+	; use after it, which would make that use throw.
+	Switcher := AppSwitcher
 	; Don't commit a cancelled session. Also don't commit a switcher that's already gone, which
 	; happens when a newer Alt+Tab session has opened and closed one in the meantime; between
 	; them, a stale hotkey thread can never activate anything.
-	if (!AppSwitcher || AppSwitcherCancelled) {
+	if (!Switcher || AppSwitcherCancelled) {
 		return
 	}
 	; Normally `AppSwitcher.FocusedCtrl` exists at this point,
 	; but it may not exist if focus changes while the switcher is open
 	; such as by pressing Win+D to show the desktop, then releasing Win.
-	SelectedPic := AppSwitcher.FocusedCtrl
+	SelectedPic := Switcher.FocusedCtrl
 	SelectedHWND := 0
 	if SelectedPic {
-		SelectedHWND := Integer(StrSplit(SelectedPic.Name, "PicForAppWithHWND")[2])
+		Parts := StrSplit(SelectedPic.Name, "PicForAppWithHWND")
+		if (Parts.Length >= 2 && IsInteger(Parts[2])) {
+			SelectedHWND := Integer(Parts[2])
+		}
 	}
 	CloseAppSwitcher()
 	if SelectedHWND {
-		WinActivate(SelectedHWND)
+		try {
+			WinActivate(SelectedHWND)
+		} catch {
+			; The window was captured when the panel was built and can have closed while the
+			; user held Alt -- a dialog that dismissed itself, an app that crashed. Throwing
+			; here would put an error box up at the exact moment they let go of Alt, which is
+			; a worse outcome than the switch quietly not happening.
+		}
 	}
 }
 
@@ -253,7 +269,12 @@ CloseAppSwitcher()
 LastFocusHighlight := 0
 UpdateFocusHighlight() {
 	global LastFocusHighlight
-	Pic := AppSwitcher.FocusedCtrl
+	; Read the global once, rather than dereferencing it repeatedly. `CancelAppSwitcher`
+	; zeroes it from the Escape hotkey's thread, and that thread can interrupt the
+	; `Send "{Tab}"` immediately before each of this function's two call sites -- at which
+	; point `AppSwitcher.FocusedCtrl` is `0.FocusedCtrl`, an unhandled exception, and an
+	; error dialog on top of the switcher the user is still holding Alt for.
+	Switcher := AppSwitcher
 	if LastFocusHighlight {
 		try {
 			LastFocusHighlight.Value := AppSwitcherUnselectedImage
@@ -261,14 +282,40 @@ UpdateFocusHighlight() {
 			; App switcher closed and destroyed the control
 		}
 	}
+	if !Switcher {
+		; Cancelled out from under us. The control we just unhighlighted belongs to a Gui
+		; that no longer exists, so forget it rather than reaching for it again next time.
+		LastFocusHighlight := 0
+		return
+	}
+	Pic := Switcher.FocusedCtrl
 	if !Pic {
 		; Probably shouldn't happen, GENERALLY, with logic outside this function focusing the app switcher if it's not focused
 		; but maybe it could lose focus immediately after being focused with `WinActivate`,
 		; or immedaitely after showing the app switcher.
 		return
 	}
-	FocusRing := FocusRingByHWND[Integer(StrSplit(Pic.Name, "PicForAppWithHWND")[2])]
-	FocusRing.Value := AppSwitcherSelectedImage
+	; Only the icon pics are named, and only they are tabstops, so this normally always
+	; resolves. But a focused control left over from a session that has already been torn
+	; down would parse to a key the map no longer holds, and an unguarded `Map` lookup
+	; throws -- so take the same view of it as of everything else here: if the answer isn't
+	; there, leave the highlight alone rather than failing loudly mid-keypress.
+	Parts := StrSplit(Pic.Name, "PicForAppWithHWND")
+	if (Parts.Length < 2 || !IsInteger(Parts[2])) {
+		return
+	}
+	Key := Integer(Parts[2])
+	if !FocusRingByHWND.Has(Key) {
+		return
+	}
+	FocusRing := FocusRingByHWND[Key]
+	try {
+		; `AppSwitcherSelectedImage` is "" if the highlight images couldn't be written at
+		; all -- see `EnsureAppSwitcherImages` -- and assigning that to a Picture throws.
+		FocusRing.Value := AppSwitcherSelectedImage
+	} catch {
+		return
+	}
 	LastFocusHighlight := FocusRing
 }
 
