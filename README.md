@@ -66,14 +66,81 @@ You can run either script directly instead of using `start-both-window-and-app-s
 
 ### Running on Startup
 
-- To run at startup with administrator privileges:
-  - Place the scripts somewhere permanent, since moving or renaming them will break the startup action.
-    - Keep the whole extracted folder together: `logical-app.ahk` must stay next to the switcher scripts, and the app switcher also needs `app-switcher-style.ahk`.
-  - Open Task Scheduler
-  - Action > Create Task...
-  - Check "Run with highest privileges" in "Security options" in General tab
-  - In Triggers tab, click "New..." and set the type to "At log on"
-  - For the Action, you can browse for the script.
+Nothing launched from the Startup folder can be elevated quietly: ticking "Run as
+administrator" on a shortcut there makes Windows ask at every single logon, and sometimes
+skip the shortcut altogether instead. A scheduled task is the only way to have both
+switchers running as administrator with no prompt — it asks once, while the task is being
+created.
+
+One task is enough for both of them. `start-both-window-and-app-switcher.ahk` starts the two
+switchers with `Run`, and a program started by an elevated program is elevated too, so
+elevating the launcher hands administrator rights to both switchers before it exits.
+
+Put the scripts somewhere permanent first, since moving or renaming them breaks the task, and
+keep the extracted folder together: `logical-app.ahk` has to stay next to the switcher
+scripts, and the app switcher also needs `app-switcher-style.ahk`.
+
+Then open Task Scheduler and choose **Create Task...** — not *Create Basic Task*, whose
+wizard can't set most of what follows.
+
+**General**
+
+- Name: anything. `Start Both Window and App Switcher (as Admin)` says what it does.
+- Leave **Run only when user is logged on** selected. The alternative, *Run whether user is
+  logged on or not*, runs the scripts in a session with no desktop, where they can neither
+  see the keyboard nor draw a panel.
+- Check **Run with highest privileges**. This is the setting the whole task exists for.
+- Configure for: the newest Windows offered.
+
+**Triggers > New...**
+
+- Begin the task: **At log on**, for your own account.
+- Optionally set *Delay task for* to 30 seconds, so it isn't racing the shell while Windows
+  is still starting up.
+
+**Actions > New...**
+
+- Action: **Start a program**
+- Program/script: AutoHotkey's interpreter —
+  `C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe` for an all-users install, or
+  `C:\Users\<you>\AppData\Local\Programs\AutoHotkey\v2\AutoHotkey64.exe` for a per-user one.
+  The `v2` folder tracks whichever v2 release is current, so the task keeps working across
+  AutoHotkey updates. Pointing the action straight at the `.ahk` instead relies on the file
+  association, which is the flakier of the two.
+- Add arguments: `"C:\path\to\start-both-window-and-app-switcher.ahk"` — *with* the quotes,
+  since the path may contain spaces.
+- Start in: `C:\path\to` — *without* quotes. This field rejects them, and that's a common
+  reason for a task that looks like it ran and did nothing.
+
+**Conditions** — clear both power boxes:
+
+- *Start the task only if the computer is on AC power*, which otherwise means no switchers at
+  all after booting a laptop on battery.
+- *Stop if the computer switches to battery power*, which otherwise stops both switchers the
+  moment you unplug.
+
+**Settings**
+
+- Clear *Stop the task if it runs longer than 3 days*. It's checked by default, and these
+  scripts are meant to run indefinitely, so the timer treats ordinary operation as a hung
+  task and ends it. Whether it reaches the switchers themselves or only the launcher — which
+  exits within a second of starting them — depends on how Task Scheduler groups the
+  processes, but if it does reach the window switcher it arrives as a kill, which is the case
+  under [Known Issues](#window-switcher-1) that leaves hidden windows hidden.
+- Leave *Allow task to be run on demand* checked. `schtasks /run /tn "<task name>"` then
+  restarts both switchers, elevated and without a prompt, which is convenient while editing
+  them.
+
+Finally, remove any Startup-folder shortcut to the launcher — <kbd>Win+R</kbd> >
+`shell:startup` opens the folder. Left in place, it starts a second, unelevated pair at every
+logon, and since both scripts use `#SingleInstance Force` the unelevated copy tries to
+replace the elevated one, which Windows doesn't permit.
+
+To check the result, right-click the task and choose **Run**. Two tray icons should appear,
+and neither should have the "not running as administrator" tooltip or the *"Why doesn't this
+work over Task Manager?"* menu item that the scripts add when they aren't elevated — those
+two disappear precisely when it's working. The real test is opening Task Manager and pressing
+<kbd>Alt+Tab</kbd>.
 
 ## Logical applications
 
