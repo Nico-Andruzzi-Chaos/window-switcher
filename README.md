@@ -131,17 +131,6 @@ wizard can't set most of what follows.
   restarts both switchers, elevated and without a prompt, which is convenient while editing
   them.
 
-Finally, remove any Startup-folder shortcut to the launcher — <kbd>Win+R</kbd> >
-`shell:startup` opens the folder. Left in place, it starts a second, unelevated pair at every
-logon, and since both scripts use `#SingleInstance Force` the unelevated copy tries to
-replace the elevated one, which Windows doesn't permit.
-
-To check the result, right-click the task and choose **Run**. Two tray icons should appear,
-and neither should have the "not running as administrator" tooltip or the *"Why doesn't this
-work over Task Manager?"* menu item that the scripts add when they aren't elevated — those
-two disappear precisely when it's working. The real test is opening Task Manager and pressing
-<kbd>Alt+Tab</kbd>.
-
 ## Logical applications
 
 Both utilities need to answer the same question: which windows belong to the same application?
