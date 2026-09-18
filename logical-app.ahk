@@ -616,7 +616,7 @@ IconFromBitmap(Bitmap) {
 ;      "Settings", "Microsoft Store", which have no shortcut on disk)
 ;   4. The executable's FileDescription, then its ProductName
 ;   5. The window title
-;   6. The executable's filename
+;   6. The executable's filename, without the extension
 ;
 ; Note that the executable's version info is preferred over the window title even
 ; though the title is more specific: window titles name the *document* ("Inbox (3) -
@@ -661,8 +661,9 @@ GetLogicalAppDisplayName(Window) {
 	}
 
 	if (Name = "" && ProcessPath != "") {
-		SplitPath(ProcessPath, &FileName)
-		Name := FileName
+		; Without the extension: this is a name to show a person, not a path.
+		SplitPath(ProcessPath, , , , &FileNameWithoutExtension)
+		Name := FileNameWithoutExtension
 	}
 
 	LogicalAppNameCache[Window] := Name
@@ -673,11 +674,24 @@ GetLogicalAppDisplayName(Window) {
 ; ordinary properties. Read through the same property store machinery as everything else here;
 ; the hand-rolled version-resource reader this replaced truncated 64-bit pointers in three
 ; places and only worked while its buffer happened to land below 4 GB.
+;
+; An executable with no description doesn't come back empty: the shell answers with the file
+; name instead. Measured on the Store build of Notepad, which carries no description at all --
+; System.FileDescription reads back "Notepad.exe", so the switcher labelled it that.
+;
+; That echo is answered by dropping the extension rather than by rejecting it, which matters:
+; rejecting it would fall through to the window title, and titles name the *document* rather
+; than the application ("*Notes.txt - Notepad"). A bare "Notepad" is what the switcher wants,
+; and an executable whose description is its own file name has told us nothing else useful.
 GetExecutableDisplayName(ProcessPath) {
 	if ExecutableDisplayNameCache.Has(ProcessPath) {
 		return ExecutableDisplayNameCache[ProcessPath]
 	}
 	Name := GetFirstFileShellProperty(ProcessPath, PKEY_Version_FMTID, PID_FileDescription, PID_ProductName)
+	SplitPath(ProcessPath, &FileName, , , &FileNameWithoutExtension)
+	if (Name = FileName) {
+		Name := FileNameWithoutExtension
+	}
 	ExecutableDisplayNameCache[ProcessPath] := Name
 	return Name
 }
