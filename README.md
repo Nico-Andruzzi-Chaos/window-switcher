@@ -112,32 +112,36 @@ wizard can't set most of what follows.
 - Start in: `C:\path\to` — *without* quotes. This field rejects them, and that's a common
   reason for a task that looks like it ran and did nothing.
 
-**Conditions** — clear both power boxes, and mind the order, because the dialog makes this
-one easy to get wrong:
+**Conditions**
 
-1. *Stop if the computer switches to battery power* first, which otherwise stops both
-   switchers the moment you unplug.
-2. *Start the task only if the computer is on AC power* second, which otherwise means no
-   switchers at all after booting a laptop on battery.
-
-Clearing the AC box greys the battery-stop box out, but greying a box doesn't clear it — the
-task keeps whatever that setting already was, and it starts out on. The service checks the
-two independently, with none of the dialog's parent-and-child arrangement, so a greyed-out
-"stop on battery" still stops the task on battery. If the AC box is already clear and the
-one below it is greyed and ticked, tick the AC box to re-enable it, clear it, then clear the
-AC box again.
+- Clear *Start the task only if the computer is on AC power*. Left checked, booting a laptop
+  on battery gets you no switchers at all, and nothing on screen to say why.
+- *Stop if the computer switches to battery power* can be left as it is, for the reason
+  below. Worth knowing anyway: it greys out the moment the box above it is clear, and greying
+  a box doesn't clear it — the task keeps that setting, and it starts out on. To clear it
+  regardless, tick the AC box to re-enable it, clear it, then clear the AC box again.
 
 **Settings**
 
-- Clear *Stop the task if it runs longer than 3 days*. It's checked by default, and these
-  scripts are meant to run indefinitely, so the timer treats ordinary operation as a hung
-  task and ends it. Whether it reaches the switchers themselves or only the launcher — which
-  exits within a second of starting them — depends on how Task Scheduler groups the
-  processes, but if it does reach the window switcher it arrives as a kill, which is the case
-  under [Known Issues](#window-switcher-1) that leaves hidden windows hidden.
+- *Stop the task if it runs longer than 3 days* can also be left as it is, though it's the
+  setting that sounds most alarming: it's checked by default, and these scripts are meant to
+  run indefinitely.
 - Leave *Allow task to be run on demand* checked. `schtasks /run /tn "<task name>"` then
   restarts both switchers, elevated and without a prompt, which is convenient while editing
   them.
+
+Neither of those two stop settings reaches the switchers, because neither switcher is what the
+task runs. The task runs the launcher, and the launcher has exited a second later, having
+handed its elevation to the two scripts it started — which Task Scheduler then doesn't count
+as part of the task at all. While both switchers are running, the task's own state reads Ready
+rather than Running, and ending the task leaves both of them running. So the timer and the
+battery-stop can only ever end a launcher that is already gone.
+
+That changes if the task points straight at `window-switcher.ahk` or `app-switcher.ahk`
+instead of at the launcher. Then the switcher *is* the task's process, both settings do end
+it, and for the window switcher that arrives as a kill — the case under
+[Known Issues](#window-switcher-1) that leaves hidden windows hidden. Clear both if the task
+is set up that way.
 
 ## Logical applications
 
