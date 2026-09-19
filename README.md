@@ -116,32 +116,32 @@ wizard can't set most of what follows.
 
 - Clear *Start the task only if the computer is on AC power*. Left checked, booting a laptop
   on battery gets you no switchers at all, and nothing on screen to say why.
-- *Stop if the computer switches to battery power* can be left as it is, for the reason
-  below. Worth knowing anyway: it greys out the moment the box above it is clear, and greying
-  a box doesn't clear it — the task keeps that setting, and it starts out on. To clear it
-  regardless, tick the AC box to re-enable it, clear it, then clear the AC box again.
 
-**Settings**
+Nothing in the **Settings** tab needs changing, including the two settings that sound as
+though they would stop the switchers: *Stop the task if it runs longer than 3 days*, and
+*Stop if the computer switches to battery power* over in Conditions. Both are checked by
+default, and neither reaches the switchers.
 
-- *Stop the task if it runs longer than 3 days* can also be left as it is, though it's the
-  setting that sounds most alarming: it's checked by default, and these scripts are meant to
-  run indefinitely.
-- Leave *Allow task to be run on demand* checked. `schtasks /run /tn "<task name>"` then
-  restarts both switchers, elevated and without a prompt, which is convenient while editing
-  them.
+What the task runs is the launcher. The launcher starts `app-switcher.ahk` and
+`window-switcher.ahk`, which inherit its administrator rights, and then exits — about a
+second after logon, with both switchers left running on their own. Task Scheduler doesn't
+count those two as part of the task: while both are running the task's own state reads Ready
+rather than Running, and ending the task leaves both of them running. So a setting that ends
+the task can only ever end a launcher that is already gone.
 
-Neither of those two stop settings reaches the switchers, because neither switcher is what the
-task runs. The task runs the launcher, and the launcher has exited a second later, having
-handed its elevation to the two scripts it started — which Task Scheduler then doesn't count
-as part of the task at all. While both switchers are running, the task's own state reads Ready
-rather than Running, and ending the task leaves both of them running. So the timer and the
-battery-stop can only ever end a launcher that is already gone.
+(Clearing the battery one anyway is more awkward than it looks, since it greys out as soon as
+the box above it is clear and greying a box doesn't clear it: you'd tick the AC box to
+re-enable it, clear it, then clear the AC box again.)
 
-That changes if the task points straight at `window-switcher.ahk` or `app-switcher.ahk`
+That all changes if the task points straight at `window-switcher.ahk` or `app-switcher.ahk`
 instead of at the launcher. Then the switcher *is* the task's process, both settings do end
 it, and for the window switcher that arrives as a kill — the case under
 [Known Issues](#window-switcher-1) that leaves hidden windows hidden. Clear both if the task
 is set up that way.
+
+One default worth keeping is *Allow task to be run on demand*, which leaves
+`schtasks /run /tn "<task name>"` able to restart both switchers, elevated and without a
+prompt — convenient while editing them.
 
 ## Logical applications
 
